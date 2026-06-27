@@ -335,23 +335,23 @@ def render_price_chart(settings: dict):
     }
 
     default_period_index_by_mode = {
-    "1분봉": 0,
-    "5분봉": 1,
-    "15분봉": 1,
-    "1시간봉": 2,
-    "일봉": 2,
-    "주봉": 4,
-    "월봉": 3,
-    "연봉": 0,
-}
+        "1분봉": 0,
+        "5분봉": 1,
+        "15분봉": 1,
+        "1시간봉": 2,
+        "일봉": 2,
+        "주봉": 4,
+        "월봉": 3,
+        "연봉": 0,
+    }
 
-with col3:
-    selected_period = st.selectbox(
-        "조회 기간",
-        options=period_options_by_mode[chart_mode],
-        index=default_period_index_by_mode[chart_mode],
-        key="chart_period"
-    )
+    with col3:
+        selected_period = st.selectbox(
+            "조회 기간",
+            options=period_options_by_mode[chart_mode],
+            index=default_period_index_by_mode[chart_mode],
+            key="chart_period"
+        )
 
     interval = interval_by_mode[chart_mode]
 
