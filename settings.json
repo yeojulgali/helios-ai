@@ -1,33 +1,29 @@
-SETTINGS_FILE = "settings.json"
-
-
-DEFAULT_SETTINGS = {
+{
     "project_name": "HeliosAI",
-
-    "analysis_tickers": ["SPY", "VOO", "QQQM"],
-
+    "analysis_tickers": [
+        "SPY",
+        "VOO",
+        "QQQM"
+    ],
     "signal_ticker": "SPY",
-
-    "portfolio_tickers": ["VOO", "QQQM"],
-
+    "portfolio_tickers": [
+        "VOO",
+        "QQQM"
+    ],
     "base_buy_plan": {
-        "VOO": 20,
-        "QQQM": 20
+        "VOO": 20.0,
+        "QQQM": 20.0
     },
-
     "target_weights": {
-        "VOO": 50,
-        "QQQM": 50
+        "VOO": 50.0,
+        "QQQM": 50.0
     },
-
-    "rebalance_tolerance_percent": 5,
-
+    "rebalance_tolerance_percent": 5.0,
     "portfolio": {
-        "VOO": 0,
-        "QQQM": 0,
-        "CASH": 0
+        "VOO": 1260000.0,
+        "QQQM": 620000.0,
+        "CASH": 2500000.0
     },
-
     "buy_rules": [
         {
             "drawdown": -25,

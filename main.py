@@ -1,23 +1,122 @@
+import copy
 import csv
+import json
 import os
 from datetime import datetime
 
 import yfinance as yf
 
-from config import (
-    TICKERS,
-    SIGNAL_TICKER,
-    PORTFOLIO_TICKERS,
-    BASE_BUY_PLAN,
-    BUY_RULES,
-    REBALANCE_TOLERANCE,
-)
+from config import DEFAULT_SETTINGS, SETTINGS_FILE
+
+
+def save_settings(settings: dict):
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
+        json.dump(settings, file, ensure_ascii=False, indent=4)
+
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        settings = copy.deepcopy(DEFAULT_SETTINGS)
+        save_settings(settings)
+
+        print("settings.json 파일이 없어 기본 설정으로 새로 만들었습니다.")
+        print("처음 실행이므로 기본 설정을 불러옵니다.\n")
+
+        return settings
+
+    with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
+        settings = json.load(file)
+
+    return settings
+
+
+def get_user_yes_no(prompt: str, default: str = "n"):
+    user_input = input(prompt).strip().lower()
+
+    if user_input == "":
+        user_input = default
+
+    return user_input in ["y", "yes", "ㅇ", "응"]
+
+
+def get_user_number(prompt: str, default=None):
+    while True:
+        if default is not None:
+            user_input = input(f"{prompt} [현재: {default}]: ").strip().replace(",", "")
+        else:
+            user_input = input(prompt).strip().replace(",", "")
+
+        if user_input == "":
+            if default is not None:
+                return default
+            return 0
+
+        try:
+            return float(user_input)
+        except ValueError:
+            print("숫자로 입력해주세요. 예: 1260000 또는 1,260,000")
+
+
+def update_settings_by_prompt(settings: dict):
+    print("\n" + "=" * 40)
+    print("⚙️ 설정 수정")
+    print("그냥 엔터를 누르면 기존 값이 유지됩니다.\n")
+
+    portfolio_tickers = settings["portfolio_tickers"]
+
+    print("1. 평소 매수 계획")
+    for ticker in portfolio_tickers:
+        current = settings["base_buy_plan"].get(ticker, 0)
+        new_value = get_user_number(f"{ticker} 평소 매수금액(달러)", current)
+        settings["base_buy_plan"][ticker] = new_value
+
+    print("\n2. 목표 비중")
+    print("예: VOO 50, QQQM 50")
+    for ticker in portfolio_tickers:
+        current = settings["target_weights"].get(ticker, 0)
+        new_value = get_user_number(f"{ticker} 목표 비중(%)", current)
+        settings["target_weights"][ticker] = new_value
+
+    print("\n3. 현재 포트폴리오")
+    print("원화 기준으로 입력하세요.")
+    for ticker in portfolio_tickers:
+        current = settings["portfolio"].get(ticker, 0)
+        new_value = get_user_number(f"{ticker} 보유금액(원)", current)
+        settings["portfolio"][ticker] = new_value
+
+    current_cash = settings["portfolio"].get("CASH", 0)
+    new_cash = get_user_number("현금 보유금액(원)", current_cash)
+    settings["portfolio"]["CASH"] = new_cash
+
+    print("\n4. 리밸런싱 허용 오차")
+    current_tolerance = settings.get("rebalance_tolerance_percent", 5)
+    new_tolerance = get_user_number("목표 비중 허용 오차(%)", current_tolerance)
+    settings["rebalance_tolerance_percent"] = new_tolerance
+
+    save_settings(settings)
+
+    print("\n✅ 설정이 settings.json에 저장되었습니다.")
+
+    return settings
+
+
+def normalize_target_weights(target_weights: dict):
+    total = sum(target_weights.values())
+
+    if total == 0:
+        equal_weight = 1 / len(target_weights)
+        return {
+            ticker: equal_weight
+            for ticker in target_weights
+        }
+
+    return {
+        ticker: weight / total
+        for ticker, weight in target_weights.items()
+    }
 
 
 def get_daily_close(ticker: str):
-    """
-    ATH 계산용 일봉 데이터
-    """
     data = yf.download(
         ticker,
         period="max",
@@ -31,7 +130,6 @@ def get_daily_close(ticker: str):
 
     close = data["Close"]
 
-    # yfinance가 가끔 DataFrame 형태로 주는 경우 처리
     if hasattr(close, "columns"):
         close = close.iloc[:, 0]
 
@@ -39,10 +137,6 @@ def get_daily_close(ticker: str):
 
 
 def get_latest_price(ticker: str):
-    """
-    현재가 계산용.
-    1분봉을 먼저 시도하고, 실패하면 일봉 최신 종가로 대체.
-    """
     intraday = yf.download(
         ticker,
         period="1d",
@@ -61,7 +155,6 @@ def get_latest_price(ticker: str):
         latest_time = close.index[-1]
         return latest_price, latest_time, "1분봉 최신가"
 
-    # 1분봉 실패 시 일봉으로 대체
     daily_close = get_daily_close(ticker)
     latest_price = daily_close.iloc[-1].item()
     latest_time = daily_close.index[-1]
@@ -69,10 +162,6 @@ def get_latest_price(ticker: str):
 
 
 def get_drawdown(ticker: str):
-    """
-    ATH는 전체 일봉 데이터 기준.
-    현재가는 가능한 최신 분봉 기준.
-    """
     daily_close = get_daily_close(ticker)
 
     ath_price = daily_close.max().item()
@@ -90,116 +179,33 @@ def get_drawdown(ticker: str):
     }
 
 
-def get_buy_signal(drawdown: float):
-    """
-    config.py에 저장된 사용자 추매 규칙을 기준으로 판단.
-    drawdown 예시:
-    -3.2  -> 평소 적립
-    -8.4  -> -8% 규칙 해당
-    -12.0 -> -10% 규칙 해당
-    """
-    for rule in BUY_RULES:
+def get_buy_signal(settings: dict, drawdown: float):
+    buy_rules = settings["buy_rules"]
+
+    sorted_rules = sorted(
+        buy_rules,
+        key=lambda rule: rule["drawdown"]
+    )
+
+    for rule in sorted_rules:
         if drawdown <= rule["drawdown"]:
             return rule["message"]
 
     return "✅ 평소 적립만 유지"
 
 
-def get_user_number(prompt: str):
-    """
-    사용자에게 숫자를 입력받는 함수.
-    쉼표가 있어도 처리 가능.
-    예: 1,260,000 -> 1260000
-    """
-    while True:
-        user_input = input(prompt).strip().replace(",", "")
-
-        if user_input == "":
-            return 0
-
-        try:
-            return float(user_input)
-        except ValueError:
-            print("숫자로 입력해주세요. 예: 1260000 또는 1,260,000")
-
-
-def get_user_target_weights():
-    """
-    사용자가 직접 목표 비중을 입력.
-    합계가 100이 아니어도 자동으로 비율 조정.
-    """
-    print("\n" + "=" * 40)
-    print("🎯 목표 비중 입력")
-    print("각 자산의 목표 비중을 %로 입력하세요.")
-    print("예: VOO 50, QQQM 50")
-    print("합계가 100이 아니어도 자동으로 비율 조정됩니다.")
-    print("둘 다 엔터를 누르면 기본값 50:50으로 설정됩니다.\n")
-
-    raw_weights = {}
-
-    for ticker in PORTFOLIO_TICKERS:
-        weight = get_user_number(f"{ticker} 목표 비중(%): ")
-        raw_weights[ticker] = weight
-
-    total_weight = sum(raw_weights.values())
-
-    if total_weight == 0:
-        print("\n목표 비중 입력이 없어 기본값 50:50으로 설정합니다.")
-        equal_weight = 1 / len(PORTFOLIO_TICKERS)
-        return {
-            ticker: equal_weight
-            for ticker in PORTFOLIO_TICKERS
-        }
-
-    target_weights = {
-        ticker: weight / total_weight
-        for ticker, weight in raw_weights.items()
-    }
-
-    print("\n적용된 목표 비중:")
-    for ticker, weight in target_weights.items():
-        print(f"- {ticker}: {weight * 100:.2f}%")
-
-    return target_weights
-
-
-def get_user_portfolio():
-    """
-    사용자가 직접 보유금액을 입력.
-    단위는 원화 기준.
-    """
-    print("\n" + "=" * 40)
-    print("💼 포트폴리오 입력")
-    print("보유금액을 원화 기준으로 입력하세요.")
-    print("없으면 그냥 엔터를 누르면 0원으로 처리됩니다.\n")
-
-    portfolio = {}
-
-    for ticker in PORTFOLIO_TICKERS:
-        amount = get_user_number(f"{ticker} 보유금액: ")
-        portfolio[ticker] = amount
-
-    cash = get_user_number("현금 보유금액: ")
-    portfolio["CASH"] = cash
-
-    return portfolio
-
-
-def print_market_report():
-    """
-    SPY, VOO, QQQM 하락률 출력
-    """
-    print("=== HeliosAI v0.7 ===")
+def print_market_report(settings: dict):
+    print("=== HeliosAI v0.8 ===")
     print("ETF 고점 대비 하락률 분석")
     print("※ ATH는 일봉 전체 데이터 기준")
     print("※ 현재가는 가능한 경우 1분봉 최신가 기준")
-    print("※ 사용자 추매 규칙은 config.py에서 불러옵니다.\n")
+    print("※ 사용자 설정은 settings.json에서 불러옵니다.\n")
 
     results = []
 
-    for ticker in TICKERS:
+    for ticker in settings["analysis_tickers"]:
         result = get_drawdown(ticker)
-        signal = get_buy_signal(result["drawdown"])
+        signal = get_buy_signal(settings, result["drawdown"])
         result["signal"] = signal
         results.append(result)
 
@@ -214,45 +220,44 @@ def print_market_report():
     return results
 
 
-def print_main_signal(results):
-    """
-    대표 지수 기준으로 오늘 행동 판단
-    """
+def print_main_signal(settings: dict, results: list):
     print("\n" + "=" * 40)
     print("📌 오늘의 핵심 판단")
 
+    signal_ticker = settings["signal_ticker"]
     signal_result = None
 
     for result in results:
-        if result["ticker"] == SIGNAL_TICKER:
+        if result["ticker"] == signal_ticker:
             signal_result = result
             break
 
     if signal_result is None:
-        print(f"{SIGNAL_TICKER} 데이터를 찾지 못했습니다.")
+        print(f"{signal_ticker} 데이터를 찾지 못했습니다.")
         return
 
-    print(f"기준 티커: {SIGNAL_TICKER}")
+    print(f"기준 티커: {signal_ticker}")
     print(f"현재 하락률: {signal_result['drawdown']:.2f}%")
     print(f"오늘 판단: {signal_result['signal']}")
 
     print("\n평소 매수 계획:")
-    for ticker, amount in BASE_BUY_PLAN.items():
-        print(f"- {ticker}: {amount}달러")
+    for ticker, amount in settings["base_buy_plan"].items():
+        print(f"- {ticker}: {amount:g}달러")
 
 
-def analyze_portfolio(portfolio: dict, target_weights: dict):
-    """
-    사용자가 입력한 포트폴리오를 기준으로 목표 비중 분석.
-    목표 비중과의 차이가 ±REBALANCE_TOLERANCE 이내면 정상 범위로 판단.
-    """
+def analyze_portfolio(settings: dict):
     print("\n" + "=" * 40)
     print("📊 포트폴리오 비중 분석")
 
+    portfolio = settings["portfolio"]
+    target_weights = normalize_target_weights(settings["target_weights"])
+    tolerance = settings.get("rebalance_tolerance_percent", 5) / 100
+
+    portfolio_tickers = settings["portfolio_tickers"]
+
     invest_assets = {
-        ticker: amount
-        for ticker, amount in portfolio.items()
-        if ticker != "CASH"
+        ticker: portfolio.get(ticker, 0)
+        for ticker in portfolio_tickers
     }
 
     total_invested = sum(invest_assets.values())
@@ -261,6 +266,7 @@ def analyze_portfolio(portfolio: dict, target_weights: dict):
 
     if total_invested == 0:
         print("투자 자산이 없습니다.")
+        print("settings.json에서 보유금액을 입력하거나, 다음 실행 때 설정을 수정하세요.")
         return
 
     print(f"투자 중인 금액: {total_invested:,.0f}원")
@@ -274,18 +280,20 @@ def analyze_portfolio(portfolio: dict, target_weights: dict):
     gaps = {}
 
     print("\n목표 비중 비교:")
-    print(f"허용 오차: ±{REBALANCE_TOLERANCE * 100:.0f}%p")
+    print(f"허용 오차: ±{tolerance * 100:.0f}%p")
 
-    for ticker, target_weight in target_weights.items():
+    for ticker in portfolio_tickers:
+        target_weight = target_weights.get(ticker, 0)
         current_value = invest_assets.get(ticker, 0)
         current_weight = current_value / total_invested
         gap = target_weight - current_weight
         gaps[ticker] = gap
 
         status = "정상 범위"
-        if gap > REBALANCE_TOLERANCE:
+
+        if gap > tolerance:
             status = "부족"
-        elif gap < -REBALANCE_TOLERANCE:
+        elif gap < -tolerance:
             status = "초과"
 
         print(f"\n{ticker}")
@@ -300,22 +308,15 @@ def analyze_portfolio(portfolio: dict, target_weights: dict):
 
     print("\n다음 매수 추천:")
 
-    if biggest_gap <= REBALANCE_TOLERANCE:
-        print(
-            f"➡️ 목표 비중과의 차이가 모두 ±{REBALANCE_TOLERANCE * 100:.0f}%p 이내입니다."
-        )
+    if biggest_gap <= tolerance:
+        print(f"➡️ 목표 비중과의 차이가 모두 ±{tolerance * 100:.0f}%p 이내입니다.")
         print("➡️ 현재는 리밸런싱 필요 없음. 기본 매수 계획대로 진행.")
     else:
-        print(
-            f"➡️ {recommended} 비중이 목표보다 {biggest_gap * 100:.2f}%p 낮습니다."
-        )
+        print(f"➡️ {recommended} 비중이 목표보다 {biggest_gap * 100:.2f}%p 낮습니다.")
         print(f"➡️ 다음 매수는 {recommended} 우선 추천.")
 
 
-def save_report(results):
-    """
-    실행 결과를 logs/report.csv에 저장
-    """
+def save_report(settings: dict, results: list):
     os.makedirs("logs", exist_ok=True)
 
     file_path = "logs/report.csv"
@@ -327,6 +328,7 @@ def save_report(results):
         if not file_exists:
             writer.writerow([
                 "run_time",
+                "signal_ticker",
                 "ticker",
                 "latest_time",
                 "price_source",
@@ -341,6 +343,7 @@ def save_report(results):
         for result in results:
             writer.writerow([
                 run_time,
+                settings["signal_ticker"],
                 result["ticker"],
                 result["latest_time"],
                 result["price_source"],
@@ -355,14 +358,19 @@ def save_report(results):
 
 
 def main():
-    results = print_market_report()
-    print_main_signal(results)
+    settings = load_settings()
 
-    target_weights = get_user_target_weights()
-    portfolio = get_user_portfolio()
+    print("현재 설정 파일: settings.json")
 
-    analyze_portfolio(portfolio, target_weights)
-    save_report(results)
+    should_update = get_user_yes_no("설정을 수정할까요? (y/N): ", default="n")
+
+    if should_update:
+        settings = update_settings_by_prompt(settings)
+
+    results = print_market_report(settings)
+    print_main_signal(settings, results)
+    analyze_portfolio(settings)
+    save_report(settings, results)
 
 
 if __name__ == "__main__":
