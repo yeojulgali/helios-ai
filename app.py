@@ -173,7 +173,6 @@ def cached_get_market_average_status(ticker: str, average_days: int = 20):
     if hasattr(close, "columns"):
         close = close.iloc[:, 0]
 
-    # Yahoo Finance에서 최신 행이 비어 있거나 NaN으로 오는 경우 방지
     close = pd.to_numeric(close, errors="coerce").dropna()
 
     if close.empty:
@@ -215,6 +214,159 @@ def cached_get_market_average_status(ticker: str, average_days: int = 20):
         "daily_change_percent": daily_change_percent,
         "latest_time": latest_time,
     }
+
+
+@st.cache_data(ttl=300)
+def cached_get_price_history(ticker: str, period: str, interval: str, chart_mode: str):
+    download_interval = interval
+    download_period = period
+
+    if chart_mode == "연봉":
+        download_interval = "1mo"
+        download_period = "max"
+
+    data = yf.download(
+        ticker,
+        period=download_period,
+        interval=download_interval,
+        progress=False,
+        auto_adjust=True
+    )
+
+    if data.empty:
+        raise ValueError(f"{ticker} 가격 데이터를 가져오지 못했습니다.")
+
+    close = data["Close"]
+
+    if hasattr(close, "columns"):
+        close = close.iloc[:, 0]
+
+    close = pd.to_numeric(close, errors="coerce").dropna()
+
+    if close.empty:
+        raise ValueError(f"{ticker} 유효한 가격 데이터가 없습니다.")
+
+    chart_df = pd.DataFrame({
+        "가격": close
+    })
+
+    if chart_mode == "연봉":
+        chart_df = chart_df.resample("YE").last().dropna()
+
+    if chart_df.empty:
+        raise ValueError(f"{ticker} 차트로 표시할 데이터가 없습니다.")
+
+    return chart_df
+
+
+def render_price_chart(settings: dict):
+    st.subheader("시장 차트")
+    st.caption("선택한 티커의 가격 흐름을 분봉, 일봉, 주봉, 월봉, 연봉 기준으로 확인합니다.")
+
+    label_map = get_ticker_label_map(settings)
+
+    ticker_options = []
+
+    for ticker in settings["market_tickers"].values():
+        if ticker not in ticker_options:
+            ticker_options.append(ticker)
+
+    for ticker in settings.get("watchlist_tickers", []):
+        if ticker not in ticker_options:
+            ticker_options.append(ticker)
+
+    for ticker in settings.get("portfolio_tickers", []):
+        if ticker not in ticker_options:
+            ticker_options.append(ticker)
+
+    if not ticker_options:
+        st.warning("차트로 볼 티커가 없습니다.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        selected_ticker = st.selectbox(
+            "차트 티커",
+            options=ticker_options,
+            format_func=lambda ticker: label_map.get(ticker, ticker),
+            key="chart_ticker"
+        )
+
+    chart_mode_options = [
+        "1분봉",
+        "5분봉",
+        "15분봉",
+        "1시간봉",
+        "일봉",
+        "주봉",
+        "월봉",
+        "연봉",
+    ]
+
+    with col2:
+        chart_mode = st.selectbox(
+            "차트 기준",
+            options=chart_mode_options,
+            index=4,
+            key="chart_mode"
+        )
+
+    period_options_by_mode = {
+        "1분봉": ["1d", "5d"],
+        "5분봉": ["1d", "5d", "1mo"],
+        "15분봉": ["5d", "1mo", "60d"],
+        "1시간봉": ["5d", "1mo", "3mo", "6mo"],
+        "일봉": ["1mo", "6mo", "1y", "5y", "max"],
+        "주봉": ["6mo", "1y", "5y", "10y", "max"],
+        "월봉": ["1y", "5y", "10y", "max"],
+        "연봉": ["max"],
+    }
+
+    interval_by_mode = {
+        "1분봉": "1m",
+        "5분봉": "5m",
+        "15분봉": "15m",
+        "1시간봉": "1h",
+        "일봉": "1d",
+        "주봉": "1wk",
+        "월봉": "1mo",
+        "연봉": "1mo",
+    }
+
+    with col3:
+        selected_period = st.selectbox(
+            "조회 기간",
+            options=period_options_by_mode[chart_mode],
+            index=0,
+            key="chart_period"
+        )
+
+    interval = interval_by_mode[chart_mode]
+
+    try:
+        chart_df = cached_get_price_history(
+            selected_ticker,
+            selected_period,
+            interval,
+            chart_mode
+        )
+
+        st.line_chart(chart_df, use_container_width=True)
+
+        latest_price = float(chart_df["가격"].iloc[-1])
+        latest_time = chart_df.index[-1]
+
+        st.caption(
+            f"최근 데이터: {latest_time} · "
+            f"{display_ticker(settings, selected_ticker)} 현재값: {format_market_value(selected_ticker, latest_price)}"
+        )
+
+        if chart_mode in ["1분봉", "5분봉", "15분봉", "1시간봉"]:
+            st.caption("참고: 분봉/시간봉 데이터는 Yahoo Finance 정책상 조회 가능 기간이 제한될 수 있습니다.")
+
+    except Exception as error:
+        st.warning(f"차트 데이터를 불러오지 못했습니다: {error}")
 
 
 def analyze_portfolio_data(settings: dict):
@@ -565,7 +717,7 @@ def main():
     settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("AI 기반 장기투자 보조 시스템 · v1.2 Login + DB Prototype")
+    st.caption("AI 기반 장기투자 보조 시스템 · v1.3 Market Chart")
 
     st.divider()
 
@@ -627,6 +779,10 @@ def main():
                             f"전일 대비: {result['daily_change_percent']:.2f}%"
                         )
                     )
+
+    st.divider()
+
+    render_price_chart(settings)
 
     st.divider()
 
