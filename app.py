@@ -32,6 +32,19 @@ def rerun_app():
         st.experimental_rerun()
 
 
+def hide_streamlit_sidebar_button():
+    st.markdown(
+        """
+        <style>
+        [data-testid="collapsedControl"] {
+            display: none;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
 def get_ticker_label_map(settings: dict):
     label_map = {}
 
@@ -544,6 +557,141 @@ def render_portfolio_cards(portfolio_result: dict):
                 st.write(f"**상태:** {row['상태']}")
 
 
+def mobile_settings_panel(settings: dict, user_id: str):
+    with st.expander("⚙️ 투자 설정하기", expanded=False):
+        st.caption("모바일에서는 여기서 주요 설정을 바꿀 수 있습니다.")
+
+        with st.expander("관심 티커 / 핵심 판단 기준", expanded=True):
+            watchlist_text = ", ".join(settings["watchlist_tickers"])
+
+            new_watchlist_text = st.text_input(
+                "관심 티커",
+                value=watchlist_text,
+                help="예: SPY, VOO, QQQM, AAPL, NVDA, 005930.KS",
+                key="mobile_watchlist_tickers"
+            )
+
+            settings["watchlist_tickers"] = normalize_ticker_list(new_watchlist_text)
+
+            label_map = get_ticker_label_map(settings)
+
+            signal_options = (
+                list(settings["market_tickers"].values())
+                + settings["watchlist_tickers"]
+            )
+
+            current_signal = settings.get("signal_ticker", "^GSPC")
+
+            if current_signal not in signal_options:
+                signal_options.append(current_signal)
+
+            settings["signal_ticker"] = st.selectbox(
+                "핵심 판단 기준",
+                options=signal_options,
+                index=signal_options.index(current_signal),
+                format_func=lambda ticker: label_map.get(ticker, ticker),
+                key="mobile_signal_ticker"
+            )
+
+        with st.expander("포트폴리오 자산", expanded=False):
+            portfolio_text = ", ".join(settings["portfolio_tickers"])
+
+            new_portfolio_text = st.text_input(
+                "비중 관리할 자산",
+                value=portfolio_text,
+                help="예: VOO, QQQM",
+                key="mobile_portfolio_tickers"
+            )
+
+            new_portfolio_tickers = normalize_ticker_list(new_portfolio_text)
+
+            if new_portfolio_tickers:
+                settings["portfolio_tickers"] = new_portfolio_tickers
+
+            for ticker in settings["portfolio_tickers"]:
+                settings["base_buy_plan"].setdefault(ticker, 0)
+                settings["target_weights"].setdefault(ticker, 0)
+                settings["portfolio"].setdefault(ticker, 0)
+
+        with st.expander("평소 매수 계획", expanded=False):
+            for ticker in settings["portfolio_tickers"]:
+                current = float(settings["base_buy_plan"].get(ticker, 0))
+
+                settings["base_buy_plan"][ticker] = st.number_input(
+                    f"{ticker} 평소 매수금액($)",
+                    min_value=0.0,
+                    value=current,
+                    step=1.0,
+                    key=f"mobile_base_buy_{ticker}"
+                )
+
+        with st.expander("목표 비중", expanded=False):
+            for ticker in settings["portfolio_tickers"]:
+                current = float(settings["target_weights"].get(ticker, 0))
+
+                settings["target_weights"][ticker] = st.number_input(
+                    f"{ticker} 목표 비중(%)",
+                    min_value=0.0,
+                    value=current,
+                    step=1.0,
+                    key=f"mobile_target_weight_{ticker}"
+                )
+
+            current_tolerance = float(settings.get("rebalance_tolerance_percent", 5))
+
+            settings["rebalance_tolerance_percent"] = st.number_input(
+                "허용 오차(%p)",
+                min_value=0.0,
+                value=current_tolerance,
+                step=1.0,
+                key="mobile_rebalance_tolerance"
+            )
+
+        with st.expander("현재 포트폴리오", expanded=False):
+            for ticker in settings["portfolio_tickers"]:
+                current = float(settings["portfolio"].get(ticker, 0))
+
+                settings["portfolio"][ticker] = st.number_input(
+                    f"{ticker} 보유금액(원)",
+                    min_value=0.0,
+                    value=current,
+                    step=10000.0,
+                    key=f"mobile_portfolio_{ticker}"
+                )
+
+            current_cash = float(settings["portfolio"].get("CASH", 0))
+
+            settings["portfolio"]["CASH"] = st.number_input(
+                "현금 보유금액(원)",
+                min_value=0.0,
+                value=current_cash,
+                step=10000.0,
+                key="mobile_cash"
+            )
+
+        with st.expander("추매 규칙", expanded=False):
+            for idx, rule in enumerate(settings["buy_rules"]):
+                rule["drawdown"] = st.number_input(
+                    f"{idx + 1}단계 하락률(%)",
+                    value=float(rule["drawdown"]),
+                    step=1.0,
+                    key=f"mobile_rule_drawdown_{idx}"
+                )
+
+                rule["message"] = st.text_input(
+                    f"{idx + 1}단계 메시지",
+                    value=rule["message"],
+                    key=f"mobile_rule_message_{idx}"
+                )
+
+        if st.button("설정 저장", type="primary", key="mobile_save_settings"):
+            try:
+                save_user_settings(user_id, settings)
+                st.success("DB 저장 완료")
+            except Exception as error:
+                st.error(f"저장 실패: {error}")
+
+
 def settings_sidebar(settings: dict, user_id: str):
     st.sidebar.title("⚙️ 설정")
     st.sidebar.caption(f"로그인: {get_current_user_email()}")
@@ -789,9 +937,13 @@ def main():
     settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("데이터 기반 장기투자 관리 도구 · v1.4 Mobile UI")
+    st.caption("데이터 기반 장기투자 관리 도구 · v1.5 Mobile Settings")
 
     mobile_mode = st.toggle("📱 모바일 보기", value=False)
+
+    if mobile_mode:
+        hide_streamlit_sidebar_button()
+        mobile_settings_panel(settings, user_id)
 
     st.divider()
 
