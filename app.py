@@ -79,7 +79,7 @@ def normalize_ticker_list(text: str):
 
 def render_auth_page():
     st.title("📈 HeliosAI")
-    st.caption("AI 기반 장기투자 보조 시스템 · 로그인 후 개인 설정을 저장할 수 있습니다.")
+    st.caption("데이터 기반 장기투자 관리 도구 · 로그인 후 개인 설정을 저장할 수 있습니다.")
 
     st.divider()
 
@@ -259,7 +259,7 @@ def cached_get_price_history(ticker: str, period: str, interval: str, chart_mode
     return chart_df
 
 
-def render_price_chart(settings: dict):
+def render_price_chart(settings: dict, mobile_mode: bool = False):
     st.subheader("시장 차트")
     st.caption("선택한 티커의 가격 흐름을 분봉, 일봉, 주봉, 월봉, 연봉 기준으로 확인합니다.")
 
@@ -283,16 +283,6 @@ def render_price_chart(settings: dict):
         st.warning("차트로 볼 티커가 없습니다.")
         return
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        selected_ticker = st.selectbox(
-            "차트 티커",
-            options=ticker_options,
-            format_func=lambda ticker: label_map.get(ticker, ticker),
-            key="chart_ticker"
-        )
-
     chart_mode_options = [
         "1분봉",
         "5분봉",
@@ -303,14 +293,6 @@ def render_price_chart(settings: dict):
         "월봉",
         "연봉",
     ]
-
-    with col2:
-        chart_mode = st.selectbox(
-            "차트 기준",
-            options=chart_mode_options,
-            index=6,
-            key="chart_mode"
-        )
 
     period_options_by_mode = {
         "1분봉": ["1d", "5d"],
@@ -345,13 +327,54 @@ def render_price_chart(settings: dict):
         "연봉": 0,
     }
 
-    with col3:
+    if mobile_mode:
+        selected_ticker = st.selectbox(
+            "차트 티커",
+            options=ticker_options,
+            format_func=lambda ticker: label_map.get(ticker, ticker),
+            key="chart_ticker"
+        )
+
+        chart_mode = st.selectbox(
+            "차트 기준",
+            options=chart_mode_options,
+            index=6,
+            key="chart_mode"
+        )
+
         selected_period = st.selectbox(
             "조회 기간",
             options=period_options_by_mode[chart_mode],
             index=default_period_index_by_mode[chart_mode],
             key="chart_period"
         )
+
+    else:
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            selected_ticker = st.selectbox(
+                "차트 티커",
+                options=ticker_options,
+                format_func=lambda ticker: label_map.get(ticker, ticker),
+                key="chart_ticker"
+            )
+
+        with col2:
+            chart_mode = st.selectbox(
+                "차트 기준",
+                options=chart_mode_options,
+                index=6,
+                key="chart_mode"
+            )
+
+        with col3:
+            selected_period = st.selectbox(
+                "조회 기간",
+                options=period_options_by_mode[chart_mode],
+                index=default_period_index_by_mode[chart_mode],
+                key="chart_period"
+            )
 
     interval = interval_by_mode[chart_mode]
 
@@ -481,6 +504,44 @@ def analyze_portfolio_data(settings: dict):
         "rows": rows,
         "recommendation": recommendation,
     }
+
+
+def render_watchlist_cards(results: list, settings: dict):
+    for result in results:
+        ticker = result["ticker"]
+        name = display_ticker(settings, ticker)
+
+        with st.container(border=True):
+            st.markdown(f"### {name}")
+
+            if "error" in result:
+                st.warning(f"오류: {result['error']}")
+                continue
+
+            st.write(f"**티커:** {ticker}")
+            st.write(f"**가격 기준:** {result['price_source']}")
+            st.write(f"**최근 데이터:** {result['latest_time']}")
+            st.write(f"**현재가:** {result['current_price']:.2f}")
+            st.write(f"**ATH:** {result['ath_price']:.2f}")
+            st.write(f"**고점 대비:** {result['drawdown']:.2f}%")
+            st.info(result["signal"])
+
+
+def render_portfolio_cards(portfolio_result: dict):
+    st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
+    st.metric("현금", format_won(portfolio_result["cash"]))
+    st.metric("총 자산", format_won(portfolio_result["total_assets"]))
+    st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
+
+    if portfolio_result["rows"]:
+        for row in portfolio_result["rows"]:
+            with st.container(border=True):
+                st.markdown(f"### {row['티커']}")
+                st.write(f"**현재 금액:** {row['현재 금액']:,.0f}원")
+                st.write(f"**현재 비중:** {row['현재 비중']:.2f}%")
+                st.write(f"**목표 비중:** {row['목표 비중']:.2f}%")
+                st.write(f"**차이:** {row['차이']:.2f}%p")
+                st.write(f"**상태:** {row['상태']}")
 
 
 def settings_sidebar(settings: dict, user_id: str):
@@ -728,29 +789,36 @@ def main():
     settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("AI 기반 장기투자 보조 시스템 · v1.3 Market Chart")
+    st.caption("데이터 기반 장기투자 관리 도구 · v1.4 Mobile UI")
+
+    mobile_mode = st.toggle("📱 모바일 보기", value=False)
 
     st.divider()
 
-    c1, c2, c3 = st.columns(3)
+    buy_plan_text = " / ".join(
+        f"{ticker} ${amount:g}"
+        for ticker, amount in settings["base_buy_plan"].items()
+        if ticker in settings["portfolio_tickers"]
+    )
 
-    with c1:
+    if buy_plan_text == "":
+        buy_plan_text = "미설정"
+
+    if mobile_mode:
         st.metric("핵심 판단 기준", display_ticker(settings, settings["signal_ticker"]))
-
-    with c2:
-        buy_plan_text = " / ".join(
-            f"{ticker} ${amount:g}"
-            for ticker, amount in settings["base_buy_plan"].items()
-            if ticker in settings["portfolio_tickers"]
-        )
-
-        if buy_plan_text == "":
-            buy_plan_text = "미설정"
-
         st.metric("평소 매수", buy_plan_text)
-
-    with c3:
         st.metric("허용 오차", f"±{settings.get('rebalance_tolerance_percent', 5):g}%p")
+    else:
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.metric("핵심 판단 기준", display_ticker(settings, settings["signal_ticker"]))
+
+        with c2:
+            st.metric("평소 매수", buy_plan_text)
+
+        with c3:
+            st.metric("허용 오차", f"±{settings.get('rebalance_tolerance_percent', 5):g}%p")
 
     if st.button("시장 데이터 새로고침 / 분석 실행", type="primary"):
         st.cache_data.clear()
@@ -764,36 +832,61 @@ def main():
         market_status = fetch_market_status(settings)
 
     if market_status:
-        cols = st.columns(min(4, len(market_status)))
-
-        for idx, result in enumerate(market_status):
-            col = cols[idx % len(cols)]
-
-            with col:
-                if "error" in result:
-                    st.metric(result["label"], "오류")
-                else:
-                    current_text = format_market_value(
-                        result["ticker"],
-                        result["current_price"]
-                    )
-
-                    delta_text = f"{result['average_diff_percent']:.2f}% vs 20일 평균"
-
-                    st.metric(
-                        result["label"],
-                        current_text,
-                        delta=delta_text,
-                        help=(
-                            f"{result['ticker']}\n"
-                            f"20일 평균: {result['average_price']:.2f}\n"
-                            f"전일 대비: {result['daily_change_percent']:.2f}%"
+        if mobile_mode:
+            for result in market_status:
+                with st.container(border=True):
+                    if "error" in result:
+                        st.metric(result["label"], "오류")
+                        st.warning(result["error"])
+                    else:
+                        current_text = format_market_value(
+                            result["ticker"],
+                            result["current_price"]
                         )
-                    )
+
+                        delta_text = f"{result['average_diff_percent']:.2f}% vs 20일 평균"
+
+                        st.metric(
+                            result["label"],
+                            current_text,
+                            delta=delta_text,
+                            help=(
+                                f"{result['ticker']}\n"
+                                f"20일 평균: {result['average_price']:.2f}\n"
+                                f"전일 대비: {result['daily_change_percent']:.2f}%"
+                            )
+                        )
+        else:
+            cols = st.columns(min(4, len(market_status)))
+
+            for idx, result in enumerate(market_status):
+                col = cols[idx % len(cols)]
+
+                with col:
+                    if "error" in result:
+                        st.metric(result["label"], "오류")
+                    else:
+                        current_text = format_market_value(
+                            result["ticker"],
+                            result["current_price"]
+                        )
+
+                        delta_text = f"{result['average_diff_percent']:.2f}% vs 20일 평균"
+
+                        st.metric(
+                            result["label"],
+                            current_text,
+                            delta=delta_text,
+                            help=(
+                                f"{result['ticker']}\n"
+                                f"20일 평균: {result['average_price']:.2f}\n"
+                                f"전일 대비: {result['daily_change_percent']:.2f}%"
+                            )
+                        )
 
     st.divider()
 
-    render_price_chart(settings)
+    render_price_chart(settings, mobile_mode)
 
     st.divider()
 
@@ -806,12 +899,8 @@ def main():
         signal_result = cached_get_drawdown(signal_ticker)
         signal_result["signal"] = get_buy_signal(settings, signal_result["drawdown"])
 
-        k1, k2, k3, k4 = st.columns(4)
-
-        with k1:
+        if mobile_mode:
             st.metric("기준", display_ticker(settings, signal_result["ticker"]))
-
-        with k2:
             st.metric(
                 "현재가",
                 format_market_value(
@@ -819,8 +908,6 @@ def main():
                     signal_result["current_price"]
                 )
             )
-
-        with k3:
             st.metric(
                 "ATH",
                 format_market_value(
@@ -828,9 +915,33 @@ def main():
                     signal_result["ath_price"]
                 )
             )
-
-        with k4:
             st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+
+            with k1:
+                st.metric("기준", display_ticker(settings, signal_result["ticker"]))
+
+            with k2:
+                st.metric(
+                    "현재가",
+                    format_market_value(
+                        signal_result["ticker"],
+                        signal_result["current_price"]
+                    )
+                )
+
+            with k3:
+                st.metric(
+                    "ATH",
+                    format_market_value(
+                        signal_result["ticker"],
+                        signal_result["ath_price"]
+                    )
+                )
+
+            with k4:
+                st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
 
         st.info(signal_result["signal"])
 
@@ -850,7 +961,10 @@ def main():
 
     watchlist_df = watchlist_results_to_dataframe(watchlist_results, settings)
 
-    st.dataframe(watchlist_df, use_container_width=True)
+    if mobile_mode:
+        render_watchlist_cards(watchlist_results, settings)
+    else:
+        st.dataframe(watchlist_df, use_container_width=True)
 
     st.divider()
 
@@ -858,24 +972,27 @@ def main():
 
     portfolio_result = analyze_portfolio_data(settings)
 
-    p1, p2, p3, p4 = st.columns(4)
+    if mobile_mode:
+        render_portfolio_cards(portfolio_result)
+    else:
+        p1, p2, p3, p4 = st.columns(4)
 
-    with p1:
-        st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
+        with p1:
+            st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
 
-    with p2:
-        st.metric("현금", format_won(portfolio_result["cash"]))
+        with p2:
+            st.metric("현금", format_won(portfolio_result["cash"]))
 
-    with p3:
-        st.metric("총 자산", format_won(portfolio_result["total_assets"]))
+        with p3:
+            st.metric("총 자산", format_won(portfolio_result["total_assets"]))
 
-    with p4:
-        st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
+        with p4:
+            st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
 
     if not portfolio_result["configured"]:
         st.warning(portfolio_result["reason"])
 
-    if portfolio_result["rows"]:
+    if not mobile_mode and portfolio_result["rows"]:
         portfolio_df = pd.DataFrame(portfolio_result["rows"])
 
         display_df = portfolio_df.copy()
