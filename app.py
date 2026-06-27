@@ -113,7 +113,11 @@ def render_auth_page():
 
         email = st.text_input("이메일", key="signup_email")
         password = st.text_input("비밀번호", type="password", key="signup_password")
-        password_check = st.text_input("비밀번호 확인", type="password", key="signup_password_check")
+        password_check = st.text_input(
+            "비밀번호 확인",
+            type="password",
+            key="signup_password_check"
+        )
 
         if st.button("회원가입"):
             if not email or not password:
@@ -169,17 +173,34 @@ def cached_get_market_average_status(ticker: str, average_days: int = 20):
     if hasattr(close, "columns"):
         close = close.iloc[:, 0]
 
-    current_price = close.iloc[-1].item()
+    # Yahoo Finance에서 최신 행이 비어 있거나 NaN으로 오는 경우 방지
+    close = pd.to_numeric(close, errors="coerce").dropna()
+
+    if close.empty:
+        raise ValueError(f"{ticker} 유효한 가격 데이터가 없습니다.")
+
+    current_price = float(close.iloc[-1])
     latest_time = close.index[-1]
 
     recent_close = close.tail(average_days)
-    average_price = recent_close.mean().item()
+
+    if recent_close.empty:
+        raise ValueError(f"{ticker} 평균 계산용 데이터가 부족합니다.")
+
+    average_price = float(recent_close.mean())
+
+    if average_price == 0:
+        raise ValueError(f"{ticker} 평균 가격이 0이라 계산할 수 없습니다.")
 
     average_diff_percent = (current_price / average_price - 1) * 100
 
     if len(close) >= 2:
-        previous_price = close.iloc[-2].item()
-        daily_change_percent = (current_price / previous_price - 1) * 100
+        previous_price = float(close.iloc[-2])
+
+        if previous_price == 0:
+            daily_change_percent = 0
+        else:
+            daily_change_percent = (current_price / previous_price - 1) * 100
     else:
         previous_price = None
         daily_change_percent = 0
@@ -348,7 +369,11 @@ def settings_sidebar(settings: dict, user_id: str):
 
         label_map = get_ticker_label_map(settings)
 
-        signal_options = list(settings["market_tickers"].values()) + settings["watchlist_tickers"]
+        signal_options = (
+            list(settings["market_tickers"].values())
+            + settings["watchlist_tickers"]
+        )
+
         current_signal = settings.get("signal_ticker", "^GSPC")
 
         if current_signal not in signal_options:
@@ -620,10 +645,22 @@ def main():
             st.metric("기준", display_ticker(settings, signal_result["ticker"]))
 
         with k2:
-            st.metric("현재가", format_market_value(signal_result["ticker"], signal_result["current_price"]))
+            st.metric(
+                "현재가",
+                format_market_value(
+                    signal_result["ticker"],
+                    signal_result["current_price"]
+                )
+            )
 
         with k3:
-            st.metric("ATH", format_market_value(signal_result["ticker"], signal_result["ath_price"]))
+            st.metric(
+                "ATH",
+                format_market_value(
+                    signal_result["ticker"],
+                    signal_result["ath_price"]
+                )
+            )
 
         with k4:
             st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
@@ -639,7 +676,10 @@ def main():
     st.caption("관심 티커는 ATH 대비 하락률 기준으로 표시합니다.")
 
     with st.spinner("관심 티커 데이터를 불러오는 중..."):
-        watchlist_results = fetch_watchlist_results(settings["watchlist_tickers"], settings)
+        watchlist_results = fetch_watchlist_results(
+            settings["watchlist_tickers"],
+            settings
+        )
 
     watchlist_df = watchlist_results_to_dataframe(watchlist_results, settings)
 
