@@ -1,12 +1,16 @@
-import copy
-import json
-import os
-
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-from config import DEFAULT_SETTINGS, SETTINGS_FILE
+from auth import (
+    sign_up,
+    sign_in,
+    sign_out,
+    is_logged_in,
+    get_current_user_id,
+    get_current_user_email,
+)
+from db import load_user_settings, save_user_settings
 from main import (
     get_drawdown,
     get_buy_signal,
@@ -21,59 +25,14 @@ st.set_page_config(
 )
 
 
-# =========================
-# 설정 저장 / 불러오기
-# =========================
+def rerun_app():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
 
-def deep_merge(default: dict, saved: dict):
-    """
-    settings.json이 예전 구조여도 새 DEFAULT_SETTINGS와 병합해서
-    새로 추가된 설정값이 자동으로 생기게 함.
-    """
-    result = copy.deepcopy(default)
-
-    for key, value in saved.items():
-        if (
-            key in result
-            and isinstance(result[key], dict)
-            and isinstance(value, dict)
-        ):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-
-    return result
-
-
-def save_settings(settings: dict):
-    with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
-        json.dump(settings, file, ensure_ascii=False, indent=4)
-
-
-def load_settings():
-    if not os.path.exists(SETTINGS_FILE):
-        settings = copy.deepcopy(DEFAULT_SETTINGS)
-        save_settings(settings)
-        return settings
-
-    with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
-        saved_settings = json.load(file)
-
-    settings = deep_merge(DEFAULT_SETTINGS, saved_settings)
-    save_settings(settings)
-
-    return settings
-
-
-# =========================
-# 표시 / 포맷
-# =========================
 
 def get_ticker_label_map(settings: dict):
-    """
-    내부 티커를 사람이 읽는 이름으로 바꿔주는 맵.
-    예: ^GSPC -> S&P500
-    """
     label_map = {}
 
     for label, ticker in settings["market_tickers"].items():
@@ -97,10 +56,6 @@ def format_won(value):
     return f"{value:,.0f}원"
 
 
-def format_dollar(value):
-    return f"${value:,.2f}"
-
-
 def format_percent(value):
     return f"{value:.2f}%"
 
@@ -122,25 +77,82 @@ def normalize_ticker_list(text: str):
     ]
 
 
-# =========================
-# 데이터 캐시
-# =========================
+def render_auth_page():
+    st.title("📈 HeliosAI")
+    st.caption("AI 기반 장기투자 보조 시스템 · 로그인 후 개인 설정을 저장할 수 있습니다.")
+
+    st.divider()
+
+    login_tab, signup_tab = st.tabs(["로그인", "회원가입"])
+
+    with login_tab:
+        st.subheader("로그인")
+
+        email = st.text_input("이메일", key="login_email")
+        password = st.text_input("비밀번호", type="password", key="login_password")
+
+        if st.button("로그인", type="primary"):
+            if not email or not password:
+                st.warning("이메일과 비밀번호를 입력해주세요.")
+                return
+
+            try:
+                user, session = sign_in(email, password)
+
+                if user and session:
+                    st.success("로그인 성공")
+                    rerun_app()
+                else:
+                    st.warning("로그인에 실패했습니다.")
+
+            except Exception as error:
+                st.error(f"로그인 실패: {error}")
+
+    with signup_tab:
+        st.subheader("회원가입")
+
+        email = st.text_input("이메일", key="signup_email")
+        password = st.text_input("비밀번호", type="password", key="signup_password")
+        password_check = st.text_input("비밀번호 확인", type="password", key="signup_password_check")
+
+        if st.button("회원가입"):
+            if not email or not password:
+                st.warning("이메일과 비밀번호를 입력해주세요.")
+                return
+
+            if password != password_check:
+                st.warning("비밀번호가 서로 다릅니다.")
+                return
+
+            if len(password) < 6:
+                st.warning("비밀번호는 최소 6자 이상으로 설정해주세요.")
+                return
+
+            try:
+                user, session = sign_up(email, password)
+
+                if user and session:
+                    st.success("회원가입 및 로그인 성공")
+                    rerun_app()
+                elif user and not session:
+                    st.success("회원가입 성공. 이메일 확인이 필요할 수 있습니다. 메일함을 확인한 뒤 로그인해주세요.")
+                else:
+                    st.warning("회원가입에 실패했습니다.")
+
+            except Exception as error:
+                st.error(f"회원가입 실패: {error}")
+
+    st.divider()
+    st.caption("주의: 이 앱은 투자 판단을 돕는 보조 도구이며 수익을 보장하지 않습니다.")
+
 
 @st.cache_data(ttl=300)
 def cached_get_drawdown(ticker: str):
-    """
-    ATH 대비 하락률 계산용.
-    관심 티커, 핵심 판단, 추매 규칙에 사용.
-    """
     return get_drawdown(ticker)
 
 
 @st.cache_data(ttl=300)
 def cached_get_market_average_status(ticker: str, average_days: int = 20):
-    """
-    시장 요약용.
-    ATH 대비가 아니라 최근 20일 평균 대비로 계산.
-    """
     data = yf.download(
         ticker,
         period="6mo",
@@ -183,10 +195,6 @@ def cached_get_market_average_status(ticker: str, average_days: int = 20):
         "latest_time": latest_time,
     }
 
-
-# =========================
-# 포트폴리오 분석
-# =========================
 
 def analyze_portfolio_data(settings: dict):
     portfolio = settings["portfolio"]
@@ -291,17 +299,17 @@ def analyze_portfolio_data(settings: dict):
     }
 
 
-# =========================
-# 사이드바 설정 UI
-# =========================
-
-def settings_sidebar(settings: dict):
+def settings_sidebar(settings: dict, user_id: str):
     st.sidebar.title("⚙️ 설정")
-    st.sidebar.caption("값을 바꾼 뒤 저장 버튼을 누르면 settings.json에 저장됩니다.")
+    st.sidebar.caption(f"로그인: {get_current_user_email()}")
+
+    if st.sidebar.button("로그아웃"):
+        sign_out()
+        rerun_app()
+
+    st.sidebar.divider()
 
     with st.sidebar.expander("시장 지표", expanded=False):
-        st.caption("시장 분위기를 보는 지표입니다. 화면 이름과 Yahoo Finance 티커를 수정할 수 있습니다.")
-
         market_tickers = settings["market_tickers"]
         new_market_tickers = {}
 
@@ -441,13 +449,12 @@ def settings_sidebar(settings: dict):
                 )
 
     if st.sidebar.button("설정 저장", type="primary"):
-        save_settings(settings)
-        st.sidebar.success("settings.json 저장 완료")
+        try:
+            save_user_settings(user_id, settings)
+            st.sidebar.success("DB 저장 완료")
+        except Exception as error:
+            st.sidebar.error(f"저장 실패: {error}")
 
-
-# =========================
-# 시장 / 관심 티커 분석
-# =========================
 
 def fetch_watchlist_results(tickers: list, settings: dict):
     results = []
@@ -517,16 +524,23 @@ def watchlist_results_to_dataframe(results: list, settings: dict):
     return pd.DataFrame(rows)
 
 
-# =========================
-# 메인 UI
-# =========================
-
 def main():
-    settings = load_settings()
-    settings_sidebar(settings)
+    if not is_logged_in():
+        render_auth_page()
+        return
+
+    user_id = get_current_user_id()
+
+    try:
+        settings = load_user_settings(user_id)
+    except Exception as error:
+        st.error(f"사용자 설정을 불러오지 못했습니다: {error}")
+        st.stop()
+
+    settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("AI 기반 장기투자 보조 시스템 · v1.1 UI Prototype")
+    st.caption("AI 기반 장기투자 보조 시스템 · v1.2 Login + DB Prototype")
 
     st.divider()
 
@@ -548,17 +562,13 @@ def main():
         st.metric("평소 매수", buy_plan_text)
 
     with c3:
-        st.metric(
-            "허용 오차",
-            f"±{settings.get('rebalance_tolerance_percent', 5):g}%p"
-        )
+        st.metric("허용 오차", f"±{settings.get('rebalance_tolerance_percent', 5):g}%p")
 
     if st.button("시장 데이터 새로고침 / 분석 실행", type="primary"):
         st.cache_data.clear()
 
     st.divider()
 
-    # 시장 요약
     st.subheader("시장 요약")
     st.caption("시장 요약은 ATH 대비가 아니라 20일 평균 대비로 표시합니다.")
 
@@ -595,7 +605,6 @@ def main():
 
     st.divider()
 
-    # 핵심 판단
     st.subheader("📌 오늘의 핵심 판단")
     st.caption("핵심 판단은 추매 규칙 적용을 위해 ATH 대비 하락률 기준으로 계산합니다.")
 
@@ -626,7 +635,6 @@ def main():
 
     st.divider()
 
-    # 관심 티커별 분석
     st.subheader("관심 티커별 하락률")
     st.caption("관심 티커는 ATH 대비 하락률 기준으로 표시합니다.")
 
@@ -639,7 +647,6 @@ def main():
 
     st.divider()
 
-    # 포트폴리오 분석
     st.subheader("포트폴리오 분석")
 
     portfolio_result = analyze_portfolio_data(settings)
