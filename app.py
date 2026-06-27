@@ -852,27 +852,66 @@ def watchlist_results_to_dataframe(results: list, settings: dict):
 
 
 def render_top_summary(settings: dict, mobile_mode: bool):
-    buy_plan_text = " / ".join(
+    buy_plan_items = [
         f"{ticker} USD {amount:g}"
         for ticker, amount in settings["base_buy_plan"].items()
-        if ticker in settings["portfolio_tickers"]
-    )
+        if ticker in settings["portfolio_tickers"] and float(amount) > 0
+    ]
 
-    if buy_plan_text == "":
+    if not buy_plan_items:
         buy_plan_text = "미설정"
+    else:
+        buy_plan_text = "<br>".join(buy_plan_items)
 
     if mobile_mode:
         st.metric("핵심 판단 기준", display_ticker(settings, settings["signal_ticker"]))
-        st.metric("평소 매수", buy_plan_text)
+
+        st.markdown(
+            f"""
+            <div style="
+                padding: 14px 16px;
+                border: 1px solid #e5e7eb;
+                border-radius: 12px;
+                margin-bottom: 10px;
+            ">
+                <div style="font-size: 14px; color: #6b7280; margin-bottom: 6px;">
+                    평소 매수
+                </div>
+                <div style="font-size: 24px; font-weight: 600; line-height: 1.5;">
+                    {buy_plan_text}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
         st.metric("허용 오차", f"±{settings.get('rebalance_tolerance_percent', 5):g}%p")
+
     else:
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3 = st.columns([1, 1.4, 1])
 
         with c1:
             st.metric("핵심 판단 기준", display_ticker(settings, settings["signal_ticker"]))
 
         with c2:
-            st.metric("평소 매수", buy_plan_text)
+            st.markdown(
+                f"""
+                <div style="
+                    padding: 14px 16px;
+                    border: 1px solid #e5e7eb;
+                    border-radius: 12px;
+                    min-height: 118px;
+                ">
+                    <div style="font-size: 14px; color: #6b7280; margin-bottom: 6px;">
+                        평소 매수
+                    </div>
+                    <div style="font-size: 28px; font-weight: 600; line-height: 1.45;">
+                        {buy_plan_text}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
         with c3:
             st.metric("허용 오차", f"±{settings.get('rebalance_tolerance_percent', 5):g}%p")
