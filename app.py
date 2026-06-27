@@ -272,6 +272,167 @@ def cached_get_price_history(ticker: str, period: str, interval: str, chart_mode
     return chart_df
 
 
+def analyze_portfolio_data(settings: dict):
+    portfolio = settings["portfolio"]
+    portfolio_tickers = settings["portfolio_tickers"]
+    target_weights_raw = settings["target_weights"]
+    tolerance = settings.get("rebalance_tolerance_percent", 5) / 100
+
+    invest_assets = {
+        ticker: float(portfolio.get(ticker, 0))
+        for ticker in portfolio_tickers
+    }
+
+    total_invested = sum(invest_assets.values())
+    cash = float(portfolio.get("CASH", 0))
+    total_assets = total_invested + cash
+
+    target_total = sum(
+        float(target_weights_raw.get(ticker, 0))
+        for ticker in portfolio_tickers
+    )
+
+    if total_invested == 0:
+        return {
+            "configured": False,
+            "reason": "투자 비율을 설정해주세요.",
+            "total_invested": 0,
+            "cash": cash,
+            "total_assets": total_assets,
+            "cash_weight": 0,
+            "rows": [],
+            "recommendation": "설정에서 보유금액과 목표 비중을 입력해주세요.",
+        }
+
+    if target_total == 0:
+        return {
+            "configured": False,
+            "reason": "투자 비율을 설정해주세요.",
+            "total_invested": total_invested,
+            "cash": cash,
+            "total_assets": total_assets,
+            "cash_weight": cash / total_assets * 100 if total_assets > 0 else 0,
+            "rows": [],
+            "recommendation": "설정에서 목표 비중을 입력해주세요.",
+        }
+
+    target_weights = normalize_target_weights({
+        ticker: float(target_weights_raw.get(ticker, 0))
+        for ticker in portfolio_tickers
+    })
+
+    rows = []
+    gaps = {}
+
+    for ticker in portfolio_tickers:
+        current_value = invest_assets.get(ticker, 0)
+        current_weight = current_value / total_invested
+        target_weight = target_weights.get(ticker, 0)
+        gap = target_weight - current_weight
+        gaps[ticker] = gap
+
+        if gap > tolerance:
+            status = "부족"
+        elif gap < -tolerance:
+            status = "초과"
+        else:
+            status = "정상 범위"
+
+        rows.append({
+            "티커": ticker,
+            "현재 금액": current_value,
+            "현재 비중": current_weight * 100,
+            "목표 비중": target_weight * 100,
+            "차이": gap * 100,
+            "상태": status,
+        })
+
+    recommended = max(gaps, key=gaps.get)
+    biggest_gap = gaps[recommended]
+
+    if biggest_gap <= tolerance:
+        recommendation = (
+            f"목표 비중과의 차이가 모두 ±{tolerance * 100:.0f}%p 이내입니다. "
+            "기본 매수 계획대로 진행하세요."
+        )
+    else:
+        recommendation = (
+            f"{recommended} 비중이 목표보다 {biggest_gap * 100:.2f}%p 낮습니다. "
+            f"다음 매수는 {recommended} 우선 추천입니다."
+        )
+
+    cash_weight = cash / total_assets * 100 if total_assets > 0 else 0
+
+    return {
+        "configured": True,
+        "reason": "",
+        "total_invested": total_invested,
+        "cash": cash,
+        "total_assets": total_assets,
+        "cash_weight": cash_weight,
+        "rows": rows,
+        "recommendation": recommendation,
+    }
+
+
+def render_portfolio_pie(settings: dict, portfolio_result: dict):
+    portfolio = settings["portfolio"]
+    portfolio_tickers = settings["portfolio_tickers"]
+
+    data = []
+
+    for ticker in portfolio_tickers:
+        value = float(portfolio.get(ticker, 0))
+        if value > 0:
+            data.append({
+                "자산": ticker,
+                "금액": value
+            })
+
+    cash = float(portfolio.get("CASH", 0))
+    if cash > 0:
+        data.append({
+            "자산": "현금",
+            "금액": cash
+        })
+
+    if not data:
+        st.info("투자 비율을 설정해주세요.")
+        return
+
+    chart_df = pd.DataFrame(data)
+
+    st.vega_lite_chart(
+        chart_df,
+        {
+            "mark": {"type": "arc", "innerRadius": 55},
+            "encoding": {
+                "theta": {
+                    "field": "금액",
+                    "type": "quantitative",
+                    "stack": True
+                },
+                "color": {
+                    "field": "자산",
+                    "type": "nominal"
+                },
+                "tooltip": [
+                    {"field": "자산", "type": "nominal"},
+                    {"field": "금액", "type": "quantitative", "format": ","}
+                ]
+            },
+            "height": 320
+        },
+        use_container_width=True
+    )
+
+    if portfolio_result["total_assets"] > 0:
+        st.caption(
+            f"총 자산 {format_won(portfolio_result['total_assets'])} · "
+            f"현금 비중 {format_percent(portfolio_result['cash_weight'])}"
+        )
+
+
 def render_price_chart(settings: dict, mobile_mode: bool = False):
     st.subheader("시장 차트")
     st.caption("선택한 티커의 가격 흐름을 분봉, 일봉, 주봉, 월봉, 연봉 기준으로 확인합니다.")
@@ -416,109 +577,6 @@ def render_price_chart(settings: dict, mobile_mode: bool = False):
         st.warning(f"차트 데이터를 불러오지 못했습니다: {error}")
 
 
-def analyze_portfolio_data(settings: dict):
-    portfolio = settings["portfolio"]
-    portfolio_tickers = settings["portfolio_tickers"]
-    target_weights_raw = settings["target_weights"]
-    tolerance = settings.get("rebalance_tolerance_percent", 5) / 100
-
-    invest_assets = {
-        ticker: float(portfolio.get(ticker, 0))
-        for ticker in portfolio_tickers
-    }
-
-    total_invested = sum(invest_assets.values())
-    cash = float(portfolio.get("CASH", 0))
-    total_assets = total_invested + cash
-
-    target_total = sum(
-        float(target_weights_raw.get(ticker, 0))
-        for ticker in portfolio_tickers
-    )
-
-    if total_invested == 0:
-        return {
-            "configured": False,
-            "reason": "아직 포트폴리오 보유금액이 설정되지 않았습니다.",
-            "total_invested": 0,
-            "cash": cash,
-            "total_assets": total_assets,
-            "cash_weight": 0,
-            "rows": [],
-            "recommendation": "왼쪽 설정에서 보유금액을 입력해주세요.",
-        }
-
-    if target_total == 0:
-        return {
-            "configured": False,
-            "reason": "아직 목표 비중이 설정되지 않았습니다.",
-            "total_invested": total_invested,
-            "cash": cash,
-            "total_assets": total_assets,
-            "cash_weight": cash / total_assets * 100 if total_assets > 0 else 0,
-            "rows": [],
-            "recommendation": "왼쪽 설정에서 목표 비중을 입력해주세요.",
-        }
-
-    target_weights = normalize_target_weights({
-        ticker: float(target_weights_raw.get(ticker, 0))
-        for ticker in portfolio_tickers
-    })
-
-    rows = []
-    gaps = {}
-
-    for ticker in portfolio_tickers:
-        current_value = invest_assets.get(ticker, 0)
-        current_weight = current_value / total_invested
-        target_weight = target_weights.get(ticker, 0)
-        gap = target_weight - current_weight
-        gaps[ticker] = gap
-
-        if gap > tolerance:
-            status = "부족"
-        elif gap < -tolerance:
-            status = "초과"
-        else:
-            status = "정상 범위"
-
-        rows.append({
-            "티커": ticker,
-            "현재 금액": current_value,
-            "현재 비중": current_weight * 100,
-            "목표 비중": target_weight * 100,
-            "차이": gap * 100,
-            "상태": status,
-        })
-
-    recommended = max(gaps, key=gaps.get)
-    biggest_gap = gaps[recommended]
-
-    if biggest_gap <= tolerance:
-        recommendation = (
-            f"목표 비중과의 차이가 모두 ±{tolerance * 100:.0f}%p 이내입니다. "
-            "기본 매수 계획대로 진행하세요."
-        )
-    else:
-        recommendation = (
-            f"{recommended} 비중이 목표보다 {biggest_gap * 100:.2f}%p 낮습니다. "
-            f"다음 매수는 {recommended} 우선 추천입니다."
-        )
-
-    cash_weight = cash / total_assets * 100 if total_assets > 0 else 0
-
-    return {
-        "configured": True,
-        "reason": "",
-        "total_invested": total_invested,
-        "cash": cash,
-        "total_assets": total_assets,
-        "cash_weight": cash_weight,
-        "rows": rows,
-        "recommendation": recommendation,
-    }
-
-
 def render_watchlist_cards(results: list, settings: dict):
     for result in results:
         ticker = result["ticker"]
@@ -541,6 +599,10 @@ def render_watchlist_cards(results: list, settings: dict):
 
 
 def render_portfolio_cards(portfolio_result: dict):
+    if portfolio_result["total_assets"] == 0:
+        st.info("투자 비율을 설정해주세요.")
+        return
+
     st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
     st.metric("현금", format_won(portfolio_result["cash"]))
     st.metric("총 자산", format_won(portfolio_result["total_assets"]))
@@ -559,182 +621,20 @@ def render_portfolio_cards(portfolio_result: dict):
 
 def mobile_settings_panel(settings: dict, user_id: str):
     with st.expander("⚙️ 투자 설정하기", expanded=False):
-        st.caption("모바일에서는 여기서 주요 설정을 바꿀 수 있습니다.")
-
-        with st.expander("관심 티커 / 핵심 판단 기준", expanded=True):
-            watchlist_text = ", ".join(settings["watchlist_tickers"])
-
-            new_watchlist_text = st.text_input(
-                "관심 티커",
-                value=watchlist_text,
-                help="예: SPY, VOO, QQQM, AAPL, NVDA, 005930.KS",
-                key="mobile_watchlist_tickers"
-            )
-
-            settings["watchlist_tickers"] = normalize_ticker_list(new_watchlist_text)
-
-            label_map = get_ticker_label_map(settings)
-
-            signal_options = (
-                list(settings["market_tickers"].values())
-                + settings["watchlist_tickers"]
-            )
-
-            current_signal = settings.get("signal_ticker", "^GSPC")
-
-            if current_signal not in signal_options:
-                signal_options.append(current_signal)
-
-            settings["signal_ticker"] = st.selectbox(
-                "핵심 판단 기준",
-                options=signal_options,
-                index=signal_options.index(current_signal),
-                format_func=lambda ticker: label_map.get(ticker, ticker),
-                key="mobile_signal_ticker"
-            )
-
-        with st.expander("포트폴리오 자산", expanded=False):
-            portfolio_text = ", ".join(settings["portfolio_tickers"])
-
-            new_portfolio_text = st.text_input(
-                "비중 관리할 자산",
-                value=portfolio_text,
-                help="예: VOO, QQQM",
-                key="mobile_portfolio_tickers"
-            )
-
-            new_portfolio_tickers = normalize_ticker_list(new_portfolio_text)
-
-            if new_portfolio_tickers:
-                settings["portfolio_tickers"] = new_portfolio_tickers
-
-            for ticker in settings["portfolio_tickers"]:
-                settings["base_buy_plan"].setdefault(ticker, 0)
-                settings["target_weights"].setdefault(ticker, 0)
-                settings["portfolio"].setdefault(ticker, 0)
-
-        with st.expander("평소 매수 계획", expanded=False):
-            for ticker in settings["portfolio_tickers"]:
-                current = float(settings["base_buy_plan"].get(ticker, 0))
-
-                settings["base_buy_plan"][ticker] = st.number_input(
-                    f"{ticker} 평소 매수금액($)",
-                    min_value=0.0,
-                    value=current,
-                    step=1.0,
-                    key=f"mobile_base_buy_{ticker}"
-                )
-
-        with st.expander("목표 비중", expanded=False):
-            for ticker in settings["portfolio_tickers"]:
-                current = float(settings["target_weights"].get(ticker, 0))
-
-                settings["target_weights"][ticker] = st.number_input(
-                    f"{ticker} 목표 비중(%)",
-                    min_value=0.0,
-                    value=current,
-                    step=1.0,
-                    key=f"mobile_target_weight_{ticker}"
-                )
-
-            current_tolerance = float(settings.get("rebalance_tolerance_percent", 5))
-
-            settings["rebalance_tolerance_percent"] = st.number_input(
-                "허용 오차(%p)",
-                min_value=0.0,
-                value=current_tolerance,
-                step=1.0,
-                key="mobile_rebalance_tolerance"
-            )
-
-        with st.expander("현재 포트폴리오", expanded=False):
-            for ticker in settings["portfolio_tickers"]:
-                current = float(settings["portfolio"].get(ticker, 0))
-
-                settings["portfolio"][ticker] = st.number_input(
-                    f"{ticker} 보유금액(원)",
-                    min_value=0.0,
-                    value=current,
-                    step=10000.0,
-                    key=f"mobile_portfolio_{ticker}"
-                )
-
-            current_cash = float(settings["portfolio"].get("CASH", 0))
-
-            settings["portfolio"]["CASH"] = st.number_input(
-                "현금 보유금액(원)",
-                min_value=0.0,
-                value=current_cash,
-                step=10000.0,
-                key="mobile_cash"
-            )
-
-        with st.expander("추매 규칙", expanded=False):
-            for idx, rule in enumerate(settings["buy_rules"]):
-                rule["drawdown"] = st.number_input(
-                    f"{idx + 1}단계 하락률(%)",
-                    value=float(rule["drawdown"]),
-                    step=1.0,
-                    key=f"mobile_rule_drawdown_{idx}"
-                )
-
-                rule["message"] = st.text_input(
-                    f"{idx + 1}단계 메시지",
-                    value=rule["message"],
-                    key=f"mobile_rule_message_{idx}"
-                )
-
-        if st.button("설정 저장", type="primary", key="mobile_save_settings"):
-            try:
-                save_user_settings(user_id, settings)
-                st.success("DB 저장 완료")
-            except Exception as error:
-                st.error(f"저장 실패: {error}")
+        render_settings_form(settings, user_id, key_prefix="mobile")
 
 
-def settings_sidebar(settings: dict, user_id: str):
-    st.sidebar.title("⚙️ 설정")
-    st.sidebar.caption(f"로그인: {get_current_user_email()}")
+def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main"):
+    st.caption("관심 티커, 목표 비중, 보유금액 등을 설정할 수 있습니다.")
 
-    if st.sidebar.button("로그아웃"):
-        sign_out()
-        rerun_app()
-
-    st.sidebar.divider()
-
-    with st.sidebar.expander("시장 지표", expanded=False):
-        market_tickers = settings["market_tickers"]
-        new_market_tickers = {}
-
-        for name, ticker in market_tickers.items():
-            col1, col2 = st.columns([1.2, 1])
-
-            with col1:
-                new_name = st.text_input(
-                    f"{name} 표시 이름",
-                    value=name,
-                    key=f"market_name_{name}"
-                )
-
-            with col2:
-                new_ticker = st.text_input(
-                    f"{name} 티커",
-                    value=ticker,
-                    key=f"market_ticker_{name}"
-                ).upper()
-
-            if new_name and new_ticker:
-                new_market_tickers[new_name] = new_ticker
-
-        settings["market_tickers"] = new_market_tickers
-
-    with st.sidebar.expander("관심 티커", expanded=True):
+    with st.expander("관심 티커 / 핵심 판단 기준", expanded=True):
         watchlist_text = ", ".join(settings["watchlist_tickers"])
 
         new_watchlist_text = st.text_input(
             "관심 티커",
             value=watchlist_text,
-            help="예: SPY, VOO, QQQM, AAPL, NVDA, 005930.KS"
+            help="예: SPY, VOO, QQQM, AAPL, NVDA, 005930.KS",
+            key=f"{key_prefix}_watchlist_tickers"
         )
 
         settings["watchlist_tickers"] = normalize_ticker_list(new_watchlist_text)
@@ -755,16 +655,18 @@ def settings_sidebar(settings: dict, user_id: str):
             "핵심 판단 기준",
             options=signal_options,
             index=signal_options.index(current_signal),
-            format_func=lambda ticker: label_map.get(ticker, ticker)
+            format_func=lambda ticker: label_map.get(ticker, ticker),
+            key=f"{key_prefix}_signal_ticker"
         )
 
-    with st.sidebar.expander("포트폴리오 자산", expanded=True):
+    with st.expander("포트폴리오 자산", expanded=False):
         portfolio_text = ", ".join(settings["portfolio_tickers"])
 
         new_portfolio_text = st.text_input(
             "비중 관리할 자산",
             value=portfolio_text,
-            help="예: VOO, QQQM"
+            help="예: VOO, QQQM",
+            key=f"{key_prefix}_portfolio_tickers"
         )
 
         new_portfolio_tickers = normalize_ticker_list(new_portfolio_text)
@@ -777,80 +679,96 @@ def settings_sidebar(settings: dict, user_id: str):
             settings["target_weights"].setdefault(ticker, 0)
             settings["portfolio"].setdefault(ticker, 0)
 
-    with st.sidebar.expander("평소 매수 계획", expanded=True):
+    with st.expander("평소 매수 계획", expanded=False):
         for ticker in settings["portfolio_tickers"]:
             current = float(settings["base_buy_plan"].get(ticker, 0))
+
             settings["base_buy_plan"][ticker] = st.number_input(
                 f"{ticker} 평소 매수금액($)",
                 min_value=0.0,
                 value=current,
                 step=1.0,
-                key=f"base_buy_{ticker}"
+                key=f"{key_prefix}_base_buy_{ticker}"
             )
 
-    with st.sidebar.expander("목표 비중", expanded=True):
+    with st.expander("목표 비중", expanded=False):
         for ticker in settings["portfolio_tickers"]:
             current = float(settings["target_weights"].get(ticker, 0))
+
             settings["target_weights"][ticker] = st.number_input(
                 f"{ticker} 목표 비중(%)",
                 min_value=0.0,
                 value=current,
                 step=1.0,
-                key=f"target_weight_{ticker}"
+                key=f"{key_prefix}_target_weight_{ticker}"
             )
 
         current_tolerance = float(settings.get("rebalance_tolerance_percent", 5))
+
         settings["rebalance_tolerance_percent"] = st.number_input(
             "허용 오차(%p)",
             min_value=0.0,
             value=current_tolerance,
             step=1.0,
+            key=f"{key_prefix}_rebalance_tolerance"
         )
 
-    with st.sidebar.expander("현재 포트폴리오", expanded=True):
+    with st.expander("현재 포트폴리오", expanded=False):
         for ticker in settings["portfolio_tickers"]:
             current = float(settings["portfolio"].get(ticker, 0))
+
             settings["portfolio"][ticker] = st.number_input(
                 f"{ticker} 보유금액(원)",
                 min_value=0.0,
                 value=current,
                 step=10000.0,
-                key=f"portfolio_{ticker}"
+                key=f"{key_prefix}_portfolio_{ticker}"
             )
 
         current_cash = float(settings["portfolio"].get("CASH", 0))
+
         settings["portfolio"]["CASH"] = st.number_input(
             "현금 보유금액(원)",
             min_value=0.0,
             value=current_cash,
             step=10000.0,
+            key=f"{key_prefix}_cash"
         )
 
-    with st.sidebar.expander("추매 규칙", expanded=False):
+    with st.expander("추매 규칙", expanded=False):
         for idx, rule in enumerate(settings["buy_rules"]):
-            col1, col2 = st.columns([1, 3])
+            rule["drawdown"] = st.number_input(
+                f"{idx + 1}단계 하락률(%)",
+                value=float(rule["drawdown"]),
+                step=1.0,
+                key=f"{key_prefix}_rule_drawdown_{idx}"
+            )
 
-            with col1:
-                rule["drawdown"] = st.number_input(
-                    f"{idx + 1}단계 하락률(%)",
-                    value=float(rule["drawdown"]),
-                    step=1.0,
-                    key=f"rule_drawdown_{idx}"
-                )
+            rule["message"] = st.text_input(
+                f"{idx + 1}단계 메시지",
+                value=rule["message"],
+                key=f"{key_prefix}_rule_message_{idx}"
+            )
 
-            with col2:
-                rule["message"] = st.text_input(
-                    f"{idx + 1}단계 메시지",
-                    value=rule["message"],
-                    key=f"rule_message_{idx}"
-                )
-
-    if st.sidebar.button("설정 저장", type="primary"):
+    if st.button("설정 저장", type="primary", key=f"{key_prefix}_save_settings"):
         try:
             save_user_settings(user_id, settings)
-            st.sidebar.success("DB 저장 완료")
+            st.success("DB 저장 완료")
         except Exception as error:
-            st.sidebar.error(f"저장 실패: {error}")
+            st.error(f"저장 실패: {error}")
+
+
+def settings_sidebar(settings: dict, user_id: str):
+    st.sidebar.title("⚙️ 설정")
+    st.sidebar.caption(f"로그인: {get_current_user_email()}")
+
+    if st.sidebar.button("로그아웃"):
+        sign_out()
+        rerun_app()
+
+    st.sidebar.divider()
+
+    render_settings_form(settings, user_id, key_prefix="sidebar")
 
 
 def fetch_watchlist_results(tickers: list, settings: dict):
@@ -921,32 +839,7 @@ def watchlist_results_to_dataframe(results: list, settings: dict):
     return pd.DataFrame(rows)
 
 
-def main():
-    if not is_logged_in():
-        render_auth_page()
-        return
-
-    user_id = get_current_user_id()
-
-    try:
-        settings = load_user_settings(user_id)
-    except Exception as error:
-        st.error(f"사용자 설정을 불러오지 못했습니다: {error}")
-        st.stop()
-
-    settings_sidebar(settings, user_id)
-
-    st.title("📈 HeliosAI")
-    st.caption("데이터 기반 장기투자 관리 도구 · v1.5 Mobile Settings")
-
-    mobile_mode = st.toggle("📱 모바일 보기", value=False)
-
-    if mobile_mode:
-        hide_streamlit_sidebar_button()
-        mobile_settings_panel(settings, user_id)
-
-    st.divider()
-
+def render_top_summary(settings: dict, mobile_mode: bool):
     buy_plan_text = " / ".join(
         f"{ticker} ${amount:g}"
         for ticker, amount in settings["base_buy_plan"].items()
@@ -972,11 +865,68 @@ def main():
         with c3:
             st.metric("허용 오차", f"±{settings.get('rebalance_tolerance_percent', 5):g}%p")
 
-    if st.button("시장 데이터 새로고침 / 분석 실행", type="primary"):
-        st.cache_data.clear()
 
-    st.divider()
+def render_signal_section(settings: dict, mobile_mode: bool):
+    st.subheader("📌 오늘의 핵심 판단")
+    st.caption("핵심 판단은 추매 규칙 적용을 위해 ATH 대비 하락률 기준으로 계산합니다.")
 
+    signal_ticker = settings["signal_ticker"]
+
+    try:
+        signal_result = cached_get_drawdown(signal_ticker)
+        signal_result["signal"] = get_buy_signal(settings, signal_result["drawdown"])
+
+        if mobile_mode:
+            st.metric("기준", display_ticker(settings, signal_result["ticker"]))
+            st.metric(
+                "현재가",
+                format_market_value(
+                    signal_result["ticker"],
+                    signal_result["current_price"]
+                )
+            )
+            st.metric(
+                "ATH",
+                format_market_value(
+                    signal_result["ticker"],
+                    signal_result["ath_price"]
+                )
+            )
+            st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+
+            with k1:
+                st.metric("기준", display_ticker(settings, signal_result["ticker"]))
+
+            with k2:
+                st.metric(
+                    "현재가",
+                    format_market_value(
+                        signal_result["ticker"],
+                        signal_result["current_price"]
+                    )
+                )
+
+            with k3:
+                st.metric(
+                    "ATH",
+                    format_market_value(
+                        signal_result["ticker"],
+                        signal_result["ath_price"]
+                    )
+                )
+
+            with k4:
+                st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
+
+        st.info(signal_result["signal"])
+
+    except Exception as error:
+        st.warning(f"핵심 판단 기준 티커 데이터를 가져오지 못했습니다: {error}")
+
+
+def render_market_summary_section(settings: dict, mobile_mode: bool):
     st.subheader("시장 요약")
     st.caption("시장 요약은 ATH 대비가 아니라 20일 평균 대비로 표시합니다.")
 
@@ -1036,127 +986,126 @@ def main():
                             )
                         )
 
-    st.divider()
 
-    render_price_chart(settings, mobile_mode)
-
-    st.divider()
-
-    st.subheader("📌 오늘의 핵심 판단")
-    st.caption("핵심 판단은 추매 규칙 적용을 위해 ATH 대비 하락률 기준으로 계산합니다.")
-
-    signal_ticker = settings["signal_ticker"]
-
-    try:
-        signal_result = cached_get_drawdown(signal_ticker)
-        signal_result["signal"] = get_buy_signal(settings, signal_result["drawdown"])
-
-        if mobile_mode:
-            st.metric("기준", display_ticker(settings, signal_result["ticker"]))
-            st.metric(
-                "현재가",
-                format_market_value(
-                    signal_result["ticker"],
-                    signal_result["current_price"]
-                )
-            )
-            st.metric(
-                "ATH",
-                format_market_value(
-                    signal_result["ticker"],
-                    signal_result["ath_price"]
-                )
-            )
-            st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
-        else:
-            k1, k2, k3, k4 = st.columns(4)
-
-            with k1:
-                st.metric("기준", display_ticker(settings, signal_result["ticker"]))
-
-            with k2:
-                st.metric(
-                    "현재가",
-                    format_market_value(
-                        signal_result["ticker"],
-                        signal_result["current_price"]
-                    )
-                )
-
-            with k3:
-                st.metric(
-                    "ATH",
-                    format_market_value(
-                        signal_result["ticker"],
-                        signal_result["ath_price"]
-                    )
-                )
-
-            with k4:
-                st.metric("고점 대비", f"{signal_result['drawdown']:.2f}%")
-
-        st.info(signal_result["signal"])
-
-    except Exception as error:
-        st.warning(f"핵심 판단 기준 티커 데이터를 가져오지 못했습니다: {error}")
-
-    st.divider()
-
-    st.subheader("관심 티커별 하락률")
-    st.caption("관심 티커는 ATH 대비 하락률 기준으로 표시합니다.")
-
-    with st.spinner("관심 티커 데이터를 불러오는 중..."):
-        watchlist_results = fetch_watchlist_results(
-            settings["watchlist_tickers"],
-            settings
-        )
-
-    watchlist_df = watchlist_results_to_dataframe(watchlist_results, settings)
-
-    if mobile_mode:
-        render_watchlist_cards(watchlist_results, settings)
-    else:
-        st.dataframe(watchlist_df, use_container_width=True)
-
-    st.divider()
-
+def render_portfolio_section(settings: dict, mobile_mode: bool):
     st.subheader("포트폴리오 분석")
 
     portfolio_result = analyze_portfolio_data(settings)
 
+    if not portfolio_result["configured"]:
+        st.info(portfolio_result["reason"])
+
     if mobile_mode:
+        render_portfolio_pie(settings, portfolio_result)
         render_portfolio_cards(portfolio_result)
     else:
-        p1, p2, p3, p4 = st.columns(4)
+        left, right = st.columns([1.1, 1])
 
-        with p1:
-            st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
+        with left:
+            render_portfolio_pie(settings, portfolio_result)
 
-        with p2:
-            st.metric("현금", format_won(portfolio_result["cash"]))
+        with right:
+            p1, p2 = st.columns(2)
 
-        with p3:
-            st.metric("총 자산", format_won(portfolio_result["total_assets"]))
+            with p1:
+                st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
 
-        with p4:
-            st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
+            with p2:
+                st.metric("현금", format_won(portfolio_result["cash"]))
 
-    if not portfolio_result["configured"]:
-        st.warning(portfolio_result["reason"])
+            p3, p4 = st.columns(2)
 
-    if not mobile_mode and portfolio_result["rows"]:
-        portfolio_df = pd.DataFrame(portfolio_result["rows"])
+            with p3:
+                st.metric("총 자산", format_won(portfolio_result["total_assets"]))
 
-        display_df = portfolio_df.copy()
-        display_df["현재 금액"] = display_df["현재 금액"].map(lambda x: f"{x:,.0f}원")
-        display_df["현재 비중"] = display_df["현재 비중"].map(lambda x: f"{x:.2f}%")
-        display_df["목표 비중"] = display_df["목표 비중"].map(lambda x: f"{x:.2f}%")
-        display_df["차이"] = display_df["차이"].map(lambda x: f"{x:.2f}%p")
+            with p4:
+                st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
 
-        st.dataframe(display_df, use_container_width=True)
+            if portfolio_result["rows"]:
+                portfolio_df = pd.DataFrame(portfolio_result["rows"])
+
+                display_df = portfolio_df.copy()
+                display_df["현재 금액"] = display_df["현재 금액"].map(lambda x: f"{x:,.0f}원")
+                display_df["현재 비중"] = display_df["현재 비중"].map(lambda x: f"{x:.2f}%")
+                display_df["목표 비중"] = display_df["목표 비중"].map(lambda x: f"{x:.2f}%")
+                display_df["차이"] = display_df["차이"].map(lambda x: f"{x:.2f}%p")
+
+                st.dataframe(display_df, use_container_width=True)
 
     st.markdown("### 다음 매수 추천")
     st.success(portfolio_result["recommendation"])
+
+
+def main():
+    if not is_logged_in():
+        render_auth_page()
+        return
+
+    user_id = get_current_user_id()
+
+    try:
+        settings = load_user_settings(user_id)
+    except Exception as error:
+        st.error(f"사용자 설정을 불러오지 못했습니다: {error}")
+        st.stop()
+
+    settings_sidebar(settings, user_id)
+
+    st.title("📈 HeliosAI")
+    st.caption("데이터 기반 장기투자 관리 도구 · v1.6 Home Dashboard")
+
+    mobile_mode = st.toggle("📱 모바일 보기", value=False)
+
+    if mobile_mode:
+        hide_streamlit_sidebar_button()
+
+    if st.button("시장 데이터 새로고침 / 분석 실행", type="primary"):
+        st.cache_data.clear()
+
+    st.divider()
+
+    tab_home, tab_chart, tab_watchlist, tab_settings = st.tabs(
+        ["홈", "차트", "관심 티커", "설정"]
+    )
+
+    with tab_home:
+        render_top_summary(settings, mobile_mode)
+
+        st.divider()
+
+        render_signal_section(settings, mobile_mode)
+
+        st.divider()
+
+        render_market_summary_section(settings, mobile_mode)
+
+        st.divider()
+
+        render_portfolio_section(settings, mobile_mode)
+
+    with tab_chart:
+        render_price_chart(settings, mobile_mode)
+
+    with tab_watchlist:
+        st.subheader("관심 티커별 하락률")
+        st.caption("관심 티커는 ATH 대비 하락률 기준으로 표시합니다.")
+
+        with st.spinner("관심 티커 데이터를 불러오는 중..."):
+            watchlist_results = fetch_watchlist_results(
+                settings["watchlist_tickers"],
+                settings
+            )
+
+        watchlist_df = watchlist_results_to_dataframe(watchlist_results, settings)
+
+        if mobile_mode:
+            render_watchlist_cards(watchlist_results, settings)
+        else:
+            st.dataframe(watchlist_df, use_container_width=True)
+
+    with tab_settings:
+        st.subheader("⚙️ 투자 설정")
+        render_settings_form(settings, user_id, key_prefix="main_settings")
 
     st.divider()
 
