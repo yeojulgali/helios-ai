@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+.DS_Store
+
+# 개인 설정/계좌 정보
+settings.json
+
+# 비밀키
+.env
+.streamlit/secrets.toml
