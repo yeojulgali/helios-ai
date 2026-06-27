@@ -681,7 +681,7 @@ def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main")
             current = float(settings["base_buy_plan"].get(ticker, 0))
 
             settings["base_buy_plan"][ticker] = st.number_input(
-                f"{ticker} 평소 매수금액($)",
+                f"{ticker} 평소 매수금액(USD)",
                 min_value=0.0,
                 value=current,
                 step=1.0,
@@ -733,8 +733,6 @@ def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main")
         )
 
     with st.expander("추매 규칙", expanded=False):
-        # 화면 표시는 약한 하락부터 자연스럽게 보여줌.
-        # 예: -5%, -8%, -10%, -15%, -20%, -25%
         sorted_rules = sorted(
             settings["buy_rules"],
             key=lambda rule: float(rule.get("drawdown", 0)),
@@ -855,7 +853,7 @@ def watchlist_results_to_dataframe(results: list, settings: dict):
 
 def render_top_summary(settings: dict, mobile_mode: bool):
     buy_plan_text = " / ".join(
-        f"{ticker} ${amount:g}"
+        f"{ticker} USD {amount:g}"
         for ticker, amount in settings["base_buy_plan"].items()
         if ticker in settings["portfolio_tickers"]
     )
@@ -1066,7 +1064,7 @@ def main():
     settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("데이터 기반 장기투자 관리 도구 · v1.7 Buy Rule Order Fix")
+    st.caption("데이터 기반 장기투자 관리 도구 · v1.8 USD Display Fix")
 
     mobile_mode = st.toggle("📱 모바일 보기", value=False)
 
