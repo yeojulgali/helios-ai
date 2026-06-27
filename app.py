@@ -383,6 +383,7 @@ def render_portfolio_pie(settings: dict, portfolio_result: dict):
 
     for ticker in portfolio_tickers:
         value = float(portfolio.get(ticker, 0))
+
         if value > 0:
             data.append({
                 "자산": ticker,
@@ -390,6 +391,7 @@ def render_portfolio_pie(settings: dict, portfolio_result: dict):
             })
 
     cash = float(portfolio.get("CASH", 0))
+
     if cash > 0:
         data.append({
             "자산": "현금",
@@ -619,11 +621,6 @@ def render_portfolio_cards(portfolio_result: dict):
                 st.write(f"**상태:** {row['상태']}")
 
 
-def mobile_settings_panel(settings: dict, user_id: str):
-    with st.expander("⚙️ 투자 설정하기", expanded=False):
-        render_settings_form(settings, user_id, key_prefix="mobile")
-
-
 def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main"):
     st.caption("관심 티커, 목표 비중, 보유금액 등을 설정할 수 있습니다.")
 
@@ -736,19 +733,36 @@ def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main")
         )
 
     with st.expander("추매 규칙", expanded=False):
-        for idx, rule in enumerate(settings["buy_rules"]):
-            rule["drawdown"] = st.number_input(
+        # 화면 표시는 약한 하락부터 자연스럽게 보여줌.
+        # 예: -5%, -8%, -10%, -15%, -20%, -25%
+        sorted_rules = sorted(
+            settings["buy_rules"],
+            key=lambda rule: float(rule.get("drawdown", 0)),
+            reverse=True
+        )
+
+        updated_rules = []
+
+        for idx, rule in enumerate(sorted_rules):
+            rule_drawdown = st.number_input(
                 f"{idx + 1}단계 하락률(%)",
                 value=float(rule["drawdown"]),
                 step=1.0,
                 key=f"{key_prefix}_rule_drawdown_{idx}"
             )
 
-            rule["message"] = st.text_input(
+            rule_message = st.text_input(
                 f"{idx + 1}단계 메시지",
                 value=rule["message"],
                 key=f"{key_prefix}_rule_message_{idx}"
             )
+
+            updated_rules.append({
+                "drawdown": rule_drawdown,
+                "message": rule_message
+            })
+
+        settings["buy_rules"] = updated_rules
 
     if st.button("설정 저장", type="primary", key=f"{key_prefix}_save_settings"):
         try:
@@ -1052,7 +1066,7 @@ def main():
     settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("데이터 기반 장기투자 관리 도구 · v1.6 Home Dashboard")
+    st.caption("데이터 기반 장기투자 관리 도구 · v1.7 Buy Rule Order Fix")
 
     mobile_mode = st.toggle("📱 모바일 보기", value=False)
 
