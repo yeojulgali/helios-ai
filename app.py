@@ -69,6 +69,10 @@ def format_won(value):
     return f"{value:,.0f}원"
 
 
+def format_usd(value):
+    return f"USD {value:,.2f}"
+
+
 def format_percent(value):
     return f"{value:.2f}%"
 
@@ -88,6 +92,79 @@ def normalize_ticker_list(text: str):
         for ticker in text.split(",")
         if ticker.strip()
     ]
+
+
+def profit_html(value: float):
+    if value > 0:
+        color = "#e53935"
+        text = f"+{value:,.0f}원"
+    elif value < 0:
+        color = "#1e88e5"
+        text = f"{value:,.0f}원"
+    else:
+        color = "#6b7280"
+        text = "0원"
+
+    return f"""
+    <div style="font-size: 16px; font-weight: 700; color: {color}; margin-top: 4px;">
+        {text}
+    </div>
+    """
+
+
+def profit_rate_html(value: float):
+    if value > 0:
+        color = "#e53935"
+        text = f"+{value:.2f}%"
+    elif value < 0:
+        color = "#1e88e5"
+        text = f"{value:.2f}%"
+    else:
+        color = "#6b7280"
+        text = "0.00%"
+
+    return f"""
+    <div style="font-size: 16px; font-weight: 700; color: {color}; margin-top: 4px;">
+        {text}
+    </div>
+    """
+
+
+def render_money_card(title: str, value_text: str, sub_html: str = ""):
+    st.markdown(
+        f"""
+        <div style="
+            padding: 14px 16px;
+            border: 1px solid #e5e7eb;
+            border-radius: 14px;
+            min-height: 105px;
+        ">
+            <div style="font-size: 14px; color: #6b7280; margin-bottom: 6px;">
+                {title}
+            </div>
+            <div style="font-size: 25px; font-weight: 700; line-height: 1.25;">
+                {value_text}
+            </div>
+            {sub_html}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def ensure_holdings(settings: dict):
+    if "holdings" not in settings or not isinstance(settings["holdings"], dict):
+        settings["holdings"] = {}
+
+    for ticker in settings.get("portfolio_tickers", []):
+        if ticker not in settings["holdings"]:
+            settings["holdings"][ticker] = {
+                "quantity": 0.0,
+                "average_price_usd": 0.0
+            }
+
+        settings["holdings"][ticker].setdefault("quantity", 0.0)
+        settings["holdings"][ticker].setdefault("average_price_usd", 0.0)
 
 
 def render_auth_page():
@@ -166,6 +243,62 @@ def render_auth_page():
 @st.cache_data(ttl=300)
 def cached_get_drawdown(ticker: str):
     return get_drawdown(ticker)
+
+
+@st.cache_data(ttl=300)
+def cached_get_latest_price(ticker: str):
+    data = yf.download(
+        ticker,
+        period="5d",
+        interval="1d",
+        progress=False,
+        auto_adjust=True
+    )
+
+    if data.empty:
+        raise ValueError(f"{ticker} 가격 데이터를 가져오지 못했습니다.")
+
+    close = data["Close"]
+
+    if hasattr(close, "columns"):
+        close = close.iloc[:, 0]
+
+    close = pd.to_numeric(close, errors="coerce").dropna()
+
+    if close.empty:
+        raise ValueError(f"{ticker} 유효한 가격 데이터가 없습니다.")
+
+    return {
+        "ticker": ticker,
+        "price": float(close.iloc[-1]),
+        "latest_time": close.index[-1]
+    }
+
+
+@st.cache_data(ttl=300)
+def cached_get_usd_krw():
+    data = yf.download(
+        "USDKRW=X",
+        period="5d",
+        interval="1d",
+        progress=False,
+        auto_adjust=True
+    )
+
+    if data.empty:
+        raise ValueError("USD/KRW 환율 데이터를 가져오지 못했습니다.")
+
+    close = data["Close"]
+
+    if hasattr(close, "columns"):
+        close = close.iloc[:, 0]
+
+    close = pd.to_numeric(close, errors="coerce").dropna()
+
+    if close.empty:
+        raise ValueError("USD/KRW 유효한 환율 데이터가 없습니다.")
+
+    return float(close.iloc[-1])
 
 
 @st.cache_data(ttl=300)
@@ -273,124 +406,177 @@ def cached_get_price_history(ticker: str, period: str, interval: str, chart_mode
 
 
 def analyze_portfolio_data(settings: dict):
-    portfolio = settings["portfolio"]
+    ensure_holdings(settings)
+
     portfolio_tickers = settings["portfolio_tickers"]
     target_weights_raw = settings["target_weights"]
+    holdings = settings["holdings"]
+    cash = float(settings.get("portfolio", {}).get("CASH", 0))
     tolerance = settings.get("rebalance_tolerance_percent", 5) / 100
 
-    invest_assets = {
-        ticker: float(portfolio.get(ticker, 0))
-        for ticker in portfolio_tickers
-    }
+    try:
+        usd_krw = cached_get_usd_krw()
+    except Exception:
+        usd_krw = 0
 
-    total_invested = sum(invest_assets.values())
-    cash = float(portfolio.get("CASH", 0))
-    total_assets = total_invested + cash
+    rows = []
+    errors = []
+
+    total_principal_krw = 0
+    total_current_krw = 0
+
+    for ticker in portfolio_tickers:
+        holding = holdings.get(ticker, {})
+        quantity = float(holding.get("quantity", 0))
+        average_price_usd = float(holding.get("average_price_usd", 0))
+
+        if quantity <= 0 or average_price_usd <= 0:
+            continue
+
+        try:
+            price_info = cached_get_latest_price(ticker)
+            current_price_usd = float(price_info["price"])
+
+            principal_usd = quantity * average_price_usd
+            current_value_usd = quantity * current_price_usd
+
+            principal_krw = principal_usd * usd_krw
+            current_value_krw = current_value_usd * usd_krw
+
+            profit_krw = current_value_krw - principal_krw
+
+            if principal_krw > 0:
+                profit_rate = profit_krw / principal_krw * 100
+            else:
+                profit_rate = 0
+
+            total_principal_krw += principal_krw
+            total_current_krw += current_value_krw
+
+            rows.append({
+                "티커": ticker,
+                "보유수량": quantity,
+                "평균매수가(USD)": average_price_usd,
+                "현재가(USD)": current_price_usd,
+                "투자 원금": principal_krw,
+                "현재 평가금액": current_value_krw,
+                "평가손익": profit_krw,
+                "수익률": profit_rate,
+                "현재 비중": 0,
+                "목표 비중": 0,
+                "차이": 0,
+                "상태": "목표 미설정",
+            })
+
+        except Exception as error:
+            errors.append(f"{ticker}: {error}")
+
+    total_assets = total_current_krw + cash
+    cash_weight = cash / total_assets * 100 if total_assets > 0 else 0
+    total_profit_krw = total_current_krw - total_principal_krw
+    total_profit_rate = total_profit_krw / total_principal_krw * 100 if total_principal_krw > 0 else 0
 
     target_total = sum(
         float(target_weights_raw.get(ticker, 0))
         for ticker in portfolio_tickers
     )
 
-    if total_invested == 0:
+    if total_current_krw == 0:
         return {
             "configured": False,
-            "reason": "투자 비율을 설정해주세요.",
-            "total_invested": 0,
+            "reason": "보유 수량과 평균매수가를 설정해주세요.",
+            "usd_krw": usd_krw,
+            "total_principal": 0,
+            "total_current": 0,
             "cash": cash,
-            "total_assets": total_assets,
-            "cash_weight": 0,
+            "total_assets": cash,
+            "cash_weight": 100 if cash > 0 else 0,
+            "total_profit": 0,
+            "total_profit_rate": 0,
             "rows": [],
-            "recommendation": "설정에서 보유금액과 목표 비중을 입력해주세요.",
+            "errors": errors,
+            "recommendation": "설정에서 보유수량과 평균매수가(USD)를 입력해주세요.",
         }
 
-    if target_total == 0:
-        return {
-            "configured": False,
-            "reason": "투자 비율을 설정해주세요.",
-            "total_invested": total_invested,
-            "cash": cash,
-            "total_assets": total_assets,
-            "cash_weight": cash / total_assets * 100 if total_assets > 0 else 0,
-            "rows": [],
-            "recommendation": "설정에서 목표 비중을 입력해주세요.",
-        }
-
-    target_weights = normalize_target_weights({
-        ticker: float(target_weights_raw.get(ticker, 0))
-        for ticker in portfolio_tickers
-    })
-
-    rows = []
-    gaps = {}
-
-    for ticker in portfolio_tickers:
-        current_value = invest_assets.get(ticker, 0)
-        current_weight = current_value / total_invested
-        target_weight = target_weights.get(ticker, 0)
-        gap = target_weight - current_weight
-        gaps[ticker] = gap
-
-        if gap > tolerance:
-            status = "부족"
-        elif gap < -tolerance:
-            status = "초과"
-        else:
-            status = "정상 범위"
-
-        rows.append({
-            "티커": ticker,
-            "현재 금액": current_value,
-            "현재 비중": current_weight * 100,
-            "목표 비중": target_weight * 100,
-            "차이": gap * 100,
-            "상태": status,
+    if target_total > 0:
+        target_weights = normalize_target_weights({
+            ticker: float(target_weights_raw.get(ticker, 0))
+            for ticker in portfolio_tickers
         })
 
-    recommended = max(gaps, key=gaps.get)
-    biggest_gap = gaps[recommended]
+        gaps = {}
 
-    if biggest_gap <= tolerance:
-        recommendation = (
-            f"목표 비중과의 차이가 모두 ±{tolerance * 100:.0f}%p 이내입니다. "
-            "기본 매수 계획대로 진행하세요."
-        )
+        for row in rows:
+            ticker = row["티커"]
+            current_weight = row["현재 평가금액"] / total_current_krw
+            target_weight = target_weights.get(ticker, 0)
+            gap = target_weight - current_weight
+            gaps[ticker] = gap
+
+            if gap > tolerance:
+                status = "부족"
+            elif gap < -tolerance:
+                status = "초과"
+            else:
+                status = "정상 범위"
+
+            row["현재 비중"] = current_weight * 100
+            row["목표 비중"] = target_weight * 100
+            row["차이"] = gap * 100
+            row["상태"] = status
+
+        recommended = max(gaps, key=gaps.get)
+        biggest_gap = gaps[recommended]
+
+        if biggest_gap <= tolerance:
+            recommendation = (
+                f"목표 비중과의 차이가 모두 ±{tolerance * 100:.0f}%p 이내입니다. "
+                "기본 매수 계획대로 진행하세요."
+            )
+        else:
+            recommendation = (
+                f"{recommended} 비중이 목표보다 {biggest_gap * 100:.2f}%p 낮습니다. "
+                f"다음 매수는 {recommended} 우선 추천입니다."
+            )
+
+        configured = True
+        reason = ""
+
     else:
-        recommendation = (
-            f"{recommended} 비중이 목표보다 {biggest_gap * 100:.2f}%p 낮습니다. "
-            f"다음 매수는 {recommended} 우선 추천입니다."
-        )
-
-    cash_weight = cash / total_assets * 100 if total_assets > 0 else 0
+        recommendation = "설정에서 목표 비중을 입력하면 다음 매수 추천을 볼 수 있습니다."
+        configured = False
+        reason = "목표 비중을 설정해주세요."
 
     return {
-        "configured": True,
-        "reason": "",
-        "total_invested": total_invested,
+        "configured": configured,
+        "reason": reason,
+        "usd_krw": usd_krw,
+        "total_principal": total_principal_krw,
+        "total_current": total_current_krw,
         "cash": cash,
         "total_assets": total_assets,
         "cash_weight": cash_weight,
+        "total_profit": total_profit_krw,
+        "total_profit_rate": total_profit_rate,
         "rows": rows,
+        "errors": errors,
         "recommendation": recommendation,
     }
 
 
 def render_portfolio_pie(settings: dict, portfolio_result: dict):
-    portfolio = settings["portfolio"]
-    portfolio_tickers = settings["portfolio_tickers"]
-
     data = []
 
-    for ticker in portfolio_tickers:
-        value = float(portfolio.get(ticker, 0))
+    for row in portfolio_result["rows"]:
+        value = float(row.get("현재 평가금액", 0))
 
         if value > 0:
             data.append({
-                "자산": ticker,
+                "자산": row["티커"],
                 "금액": value
             })
 
-    cash = float(portfolio.get("CASH", 0))
+    cash = float(portfolio_result.get("cash", 0))
 
     if cash > 0:
         data.append({
@@ -399,7 +585,7 @@ def render_portfolio_pie(settings: dict, portfolio_result: dict):
         })
 
     if not data:
-        st.info("투자 비율을 설정해주세요.")
+        st.info("보유 수량과 평균매수가를 설정해주세요.")
         return
 
     chart_df = pd.DataFrame(data)
@@ -430,8 +616,9 @@ def render_portfolio_pie(settings: dict, portfolio_result: dict):
 
     if portfolio_result["total_assets"] > 0:
         st.caption(
-            f"총 자산 {format_won(portfolio_result['total_assets'])} · "
-            f"현금 비중 {format_percent(portfolio_result['cash_weight'])}"
+            f"총자산 {format_won(portfolio_result['total_assets'])} · "
+            f"현금 비중 {format_percent(portfolio_result['cash_weight'])} · "
+            f"USD/KRW {portfolio_result['usd_krw']:,.2f}"
         )
 
 
@@ -602,27 +789,38 @@ def render_watchlist_cards(results: list, settings: dict):
 
 def render_portfolio_cards(portfolio_result: dict):
     if portfolio_result["total_assets"] == 0:
-        st.info("투자 비율을 설정해주세요.")
+        st.info("보유 수량과 평균매수가를 설정해주세요.")
         return
 
-    st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
+    st.metric("투자 원금", format_won(portfolio_result["total_principal"]))
+    st.metric("현재 평가금액", format_won(portfolio_result["total_current"]))
+    st.markdown(profit_html(portfolio_result["total_profit"]), unsafe_allow_html=True)
+    st.markdown(profit_rate_html(portfolio_result["total_profit_rate"]), unsafe_allow_html=True)
+
     st.metric("현금", format_won(portfolio_result["cash"]))
-    st.metric("총 자산", format_won(portfolio_result["total_assets"]))
-    st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
+    st.metric("총자산", format_won(portfolio_result["total_assets"]))
 
     if portfolio_result["rows"]:
         for row in portfolio_result["rows"]:
             with st.container(border=True):
                 st.markdown(f"### {row['티커']}")
-                st.write(f"**현재 금액:** {row['현재 금액']:,.0f}원")
+                st.write(f"**보유수량:** {row['보유수량']:,.6f}")
+                st.write(f"**평균매수가:** {format_usd(row['평균매수가(USD)'])}")
+                st.write(f"**현재가:** {format_usd(row['현재가(USD)'])}")
+                st.write(f"**투자 원금:** {format_won(row['투자 원금'])}")
+                st.write(f"**현재 평가금액:** {format_won(row['현재 평가금액'])}")
+                st.markdown(f"**평가손익:**", unsafe_allow_html=True)
+                st.markdown(profit_html(row["평가손익"]), unsafe_allow_html=True)
+                st.write(f"**수익률:** {row['수익률']:.2f}%")
                 st.write(f"**현재 비중:** {row['현재 비중']:.2f}%")
                 st.write(f"**목표 비중:** {row['목표 비중']:.2f}%")
-                st.write(f"**차이:** {row['차이']:.2f}%p")
                 st.write(f"**상태:** {row['상태']}")
 
 
 def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main"):
-    st.caption("관심 티커, 목표 비중, 보유금액 등을 설정할 수 있습니다.")
+    ensure_holdings(settings)
+
+    st.caption("관심 티커, 목표 비중, 보유수량, 평균매수가 등을 설정할 수 있습니다.")
 
     with st.expander("관심 티커 / 핵심 판단 기준", expanded=True):
         watchlist_text = ", ".join(settings["watchlist_tickers"])
@@ -671,10 +869,18 @@ def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main")
         if new_portfolio_tickers:
             settings["portfolio_tickers"] = new_portfolio_tickers
 
+        ensure_holdings(settings)
+
         for ticker in settings["portfolio_tickers"]:
             settings["base_buy_plan"].setdefault(ticker, 0)
             settings["target_weights"].setdefault(ticker, 0)
-            settings["portfolio"].setdefault(ticker, 0)
+            settings["holdings"].setdefault(
+                ticker,
+                {
+                    "quantity": 0.0,
+                    "average_price_usd": 0.0
+                }
+            )
 
     with st.expander("평소 매수 계획", expanded=False):
         for ticker in settings["portfolio_tickers"]:
@@ -710,18 +916,39 @@ def render_settings_form(settings: dict, user_id: str, key_prefix: str = "main")
             key=f"{key_prefix}_rebalance_tolerance"
         )
 
-    with st.expander("현재 포트폴리오", expanded=False):
-        for ticker in settings["portfolio_tickers"]:
-            current = float(settings["portfolio"].get(ticker, 0))
+    with st.expander("보유 수량 / 평균매수가", expanded=False):
+        ensure_holdings(settings)
 
-            settings["portfolio"][ticker] = st.number_input(
-                f"{ticker} 보유금액(원)",
-                min_value=0.0,
-                value=current,
-                step=10000.0,
-                key=f"{key_prefix}_portfolio_{ticker}"
+        for ticker in settings["portfolio_tickers"]:
+            holding = settings["holdings"].setdefault(
+                ticker,
+                {
+                    "quantity": 0.0,
+                    "average_price_usd": 0.0
+                }
             )
 
+            st.markdown(f"#### {ticker}")
+
+            holding["quantity"] = st.number_input(
+                f"{ticker} 보유수량",
+                min_value=0.0,
+                value=float(holding.get("quantity", 0)),
+                step=0.000001,
+                format="%.6f",
+                key=f"{key_prefix}_holding_quantity_{ticker}"
+            )
+
+            holding["average_price_usd"] = st.number_input(
+                f"{ticker} 평균매수가(USD)",
+                min_value=0.0,
+                value=float(holding.get("average_price_usd", 0)),
+                step=1.0,
+                key=f"{key_prefix}_average_price_usd_{ticker}"
+            )
+
+    with st.expander("현금", expanded=False):
+        settings.setdefault("portfolio", {})
         current_cash = float(settings["portfolio"].get("CASH", 0))
 
         settings["portfolio"]["CASH"] = st.number_input(
@@ -1046,6 +1273,10 @@ def render_portfolio_section(settings: dict, mobile_mode: bool):
     if not portfolio_result["configured"]:
         st.info(portfolio_result["reason"])
 
+    if portfolio_result.get("errors"):
+        for error in portfolio_result["errors"]:
+            st.warning(error)
+
     if mobile_mode:
         render_portfolio_pie(settings, portfolio_result)
         render_portfolio_cards(portfolio_result)
@@ -1056,27 +1287,46 @@ def render_portfolio_section(settings: dict, mobile_mode: bool):
             render_portfolio_pie(settings, portfolio_result)
 
         with right:
-            p1, p2 = st.columns(2)
+            c1, c2 = st.columns(2)
 
-            with p1:
-                st.metric("투자 중인 금액", format_won(portfolio_result["total_invested"]))
+            with c1:
+                render_money_card(
+                    "투자 원금",
+                    format_won(portfolio_result["total_principal"])
+                )
 
-            with p2:
-                st.metric("현금", format_won(portfolio_result["cash"]))
+            with c2:
+                render_money_card(
+                    "현재 평가금액",
+                    format_won(portfolio_result["total_current"]),
+                    profit_html(portfolio_result["total_profit"]) + profit_rate_html(portfolio_result["total_profit_rate"])
+                )
 
-            p3, p4 = st.columns(2)
+            c3, c4 = st.columns(2)
 
-            with p3:
-                st.metric("총 자산", format_won(portfolio_result["total_assets"]))
+            with c3:
+                render_money_card(
+                    "현금",
+                    format_won(portfolio_result["cash"])
+                )
 
-            with p4:
-                st.metric("현금 비중", format_percent(portfolio_result["cash_weight"]))
+            with c4:
+                render_money_card(
+                    "총자산",
+                    format_won(portfolio_result["total_assets"])
+                )
 
             if portfolio_result["rows"]:
                 portfolio_df = pd.DataFrame(portfolio_result["rows"])
 
                 display_df = portfolio_df.copy()
-                display_df["현재 금액"] = display_df["현재 금액"].map(lambda x: f"{x:,.0f}원")
+                display_df["보유수량"] = display_df["보유수량"].map(lambda x: f"{x:,.6f}")
+                display_df["평균매수가(USD)"] = display_df["평균매수가(USD)"].map(lambda x: f"USD {x:,.2f}")
+                display_df["현재가(USD)"] = display_df["현재가(USD)"].map(lambda x: f"USD {x:,.2f}")
+                display_df["투자 원금"] = display_df["투자 원금"].map(lambda x: f"{x:,.0f}원")
+                display_df["현재 평가금액"] = display_df["현재 평가금액"].map(lambda x: f"{x:,.0f}원")
+                display_df["평가손익"] = display_df["평가손익"].map(lambda x: f"{x:,.0f}원")
+                display_df["수익률"] = display_df["수익률"].map(lambda x: f"{x:.2f}%")
                 display_df["현재 비중"] = display_df["현재 비중"].map(lambda x: f"{x:.2f}%")
                 display_df["목표 비중"] = display_df["목표 비중"].map(lambda x: f"{x:.2f}%")
                 display_df["차이"] = display_df["차이"].map(lambda x: f"{x:.2f}%p")
@@ -1100,10 +1350,11 @@ def main():
         st.error(f"사용자 설정을 불러오지 못했습니다: {error}")
         st.stop()
 
+    ensure_holdings(settings)
     settings_sidebar(settings, user_id)
 
     st.title("📈 HeliosAI")
-    st.caption("데이터 기반 장기투자 관리 도구 · v1.8 USD Display Fix")
+    st.caption("데이터 기반 장기투자 관리 도구 · v1.9 Holdings Profit")
 
     mobile_mode = st.toggle("📱 모바일 보기", value=False)
 
